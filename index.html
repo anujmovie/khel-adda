@@ -52,6 +52,13 @@ label{font-size:13px;font-weight:600;color:var(--muted)}
 .row{display:flex;gap:8px}
 .row > *{flex:1}
 .hidden{display:none!important}
+canvas.drawbox{width:100%;height:320px;background:#fff;border:1.5px solid var(--line);border-radius:12px;touch-action:none;cursor:crosshair}
+.swatches{display:flex;gap:8px;flex-wrap:wrap}
+.swatch{width:30px;height:30px;border-radius:50%;border:2px solid transparent;cursor:pointer}
+.swatch.sel{border-color:var(--ink)}
+.toolrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.gametabs{display:flex;gap:8px}
+.gametabs .btn{font-size:14px;padding:10px}
 </style>
 </head>
 <body>
@@ -142,6 +149,9 @@ function hostRoom(name){
       } else if(msg.t==='chat'){bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
       else if(msg.t==='vote'){onVote(conn.peer,msg.vote);}
       else if(msg.t==='spyguess'){onSpyGuess(String(msg.word||''));}
+      else if(msg.t==='guess'){if(!onDrawGuess(conn.peer,String(msg.text||'')))bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
+      else if(msg.t==='drawdone'){if(conn.peer===S.draw.drawer)endDrawRound('done');}
+      else if(msg.t==='stroke'||msg.t==='clearcanvas'){if(conn.peer===S.draw.drawer){bcastRaw(msg);}}
     });
     conn.on('close',()=>{
       const i=S.players.findIndex(p=>p.id===conn.peer);
@@ -204,6 +214,11 @@ function uiLobby(){
 ${S.isHost?`
 <div class="card">
   <h2>Game settings</h2>
+  <div class="gametabs">
+    <button class="btn" id="tab-spy">Kaun Spy Hai</button>
+    <button class="btn ghost" id="tab-draw">Banao aur Guess Karo</button>
+  </div>
+  <div id="spysettings">
   <label>Word pack</label>
   <select id="pack">
     <option value="mixed">Mixed (sab kuch)</option>
@@ -213,13 +228,24 @@ ${S.isHost?`
   </select>
   <label>Discussion time</label>
   <select id="minutes"><option value="2">2 min</option><option value="3" selected>3 min</option><option value="5">5 min</option></select>
-  <button class="btn" id="start" ${S.players.length<3?'disabled':''}>Kaun Spy Hai shuru karo${S.players.length<3?' (kam se kam 3 players)':''}</button>
-  <div class="note">Abhi online version mein Kaun Spy Hai hai. Aur games aur voice chat kaam par hain.</div>
+  </div>
+  <button class="btn" id="start" ${S.players.length<3?'disabled':''}>Game shuru karo${S.players.length<3?' (kam se kam 3 players)':''}</button>
+  <div class="note">Spy game mein 3-8 players best. Draw game 2-8 players.</div>
 </div>`:`
 <div class="card"><div class="note">Host game shuru karega. Pack aur time host chunta hai.</div></div>`}`;
-  if(S.isHost){const b=$('#start');if(b)b.addEventListener('click',startGame);}
+  if(S.isHost){window._gameSel=wireGameTabs();const b=$('#start');if(b)b.addEventListener('click',startGame);}
 });}
+function wireGameTabs(){
+  let sel='spy';
+  const ts=$('#tab-spy'),td=$('#tab-draw');
+  const paint=()=>{ts.className='btn '+(sel==='spy'?'':'ghost');td.className='btn '+(sel==='draw'?'':'ghost');$('#spysettings').style.display=sel==='spy'?'':'none';};
+  ts.addEventListener('click',()=>{sel='spy';paint();});
+  td.addEventListener('click',()=>{sel='draw';paint();});
+  paint();
+  return ()=>sel;
+}
 function startGame(){
+  if(window._gameSel&&window._gameSel()==='draw'){startDrawGame();return;}
   S.pack=$('#pack').value;S.minutes=parseInt($('#minutes').value,10);
   const words=allWords(S.pack);
   const word=words[Math.floor(Math.random()*words.length)];
@@ -425,6 +451,179 @@ function wireIncomingCalls(){
     if(!S.voiceOn||!S.localStream){try{call.close();}catch(e){}return;}
     call.answer(S.localStream);
     wireCall(call,call.peer);
+  });
+}
+
+/* ---------- BANAO AUR GUESS KARO (online) ---------- */
+const DRAW_WORDS=['Chai','Rickshaw','Cricket Bat','Diwali Diya','Auto','Kite','Samosa','Auto Rickshaw','Taj Mahal','Cycle','Chappal','Pressure Cooker','Cow','Mango','Train','Umbrella','Jugaad','Baraat','Ludo','Hawa Mahal'];
+const DRAW_COLORS=['#2b2620','#c25b4e','#5f9c8a','#c9a227','#4a6fa5','#8e5ea2'];
+S.draw={round:0,drawer:'',word:'',scores:{},strokes:[],color:'#2b2620',size:4,drawing:false,guessed:{}};
+
+function startDrawGame(){
+  S.draw.scores={};S.players.forEach(p=>S.draw.scores[p.id]=0);
+  S.draw.order=S.players.map(p=>p.id);
+  S.draw.round=0;
+  bcast({t:'drawlobby',total:S.draw.order.length});
+  nextDrawRound();
+}
+function nextDrawRound(){
+  if(S.draw.round>=S.draw.order.length){
+    const sc=S.players.map(p=>({name:p.name,score:S.draw.scores[p.id]||0})).sort((a,b)=>b.score-a.score);
+    bcast({t:'drawfinal',scores:sc});
+    uiDrawFinal(sc);return;
+  }
+  const drawerId=S.draw.order[S.draw.round];
+  S.draw.drawer=drawerId;
+  S.draw.word=DRAW_WORDS[Math.floor(Math.random()*DRAW_WORDS.length)];
+  S.draw.guessed={};
+  S.draw.strokes=[];
+  S.endAt=Date.now()+60000;
+  S.draw.displayRound=S.draw.round+1;
+  bcast({t:'drawstart',drawer:drawerId,drawerName:pname(drawerId),endAt:S.endAt,round:S.draw.round+1,total:S.draw.order.length});
+  if(drawerId==='host')S.draw.myword=S.draw.word;
+  else send(S.conns[drawerId],{t:'drawword',word:S.draw.word});
+  uiDraw(drawerId==='host');
+}
+function endDrawRound(reason){
+  if(S.phase!=='draw')return;
+  S.phase='drawend';
+  S.draw.round++;
+  bcast({t:'drawend',word:S.draw.word,reason});
+  bcastScores();
+  setTimeout(nextDrawRound,6000);
+}
+function bcastScores(){
+  const sc=S.players.map(p=>({name:p.name,score:S.draw.scores[p.id]||0}));
+  bcast({t:'drawscores',scores:sc});
+}
+function onDrawGuess(fromId,text){
+  if(S.phase!=='draw')return false;
+  const guess=text.trim().toLowerCase();
+  if(guess===S.draw.word.toLowerCase()&&!S.draw.guessed[fromId]&&fromId!==S.draw.drawer){
+    S.draw.guessed[fromId]=true;
+    S.draw.scores[fromId]=(S.draw.scores[fromId]||0)+2;
+    S.draw.scores[S.draw.drawer]=(S.draw.scores[S.draw.drawer]||0)+1;
+    bcast({t:'sys',text:pname(fromId)+' ne sahi guess kiya! (+2)'});
+    bcastScores();
+    if(Object.keys(S.draw.guessed).length>=S.players.length-1)endDrawRound('allguessed');
+    return true;
+  }
+  return false;
+}
+
+/* guest message handling for draw */
+const _oldGuestMsg = onGuestMsg;
+onGuestMsg = function(m){
+  if(m.t==='drawlobby'){S.draw.total=m.total;}
+  else if(m.t==='drawstart'){S.draw.drawer=m.drawer;S.endAt=m.endAt;S.draw.displayRound=m.round;S.draw.total=m.total;S.draw.myword='';S.phase='draw';uiDraw(m.drawer===S.me.id);}
+  else if(m.t==='drawword'){S.draw.myword=m.word;const w=$('#drawword');if(w)w.textContent='Tumhara word: '+m.word;}
+  else if(m.t==='stroke'){if(!(S.draw.drawer===S.me.id))paintStroke(m);}
+  else if(m.t==='clearcanvas'){const c=$('#cv');if(c)c.getContext('2d').clearRect(0,0,c.width,c.height);}
+  else if(m.t==='drawscores'){renderDrawScores(m.scores);}
+  else if(m.t==='drawend'){showDrawEnd(m.word);}
+  else if(m.t==='drawfinal'){uiDrawFinal(m.scores);}
+  else if(m.t==='backtolobby'){uiLobby();}
+  else {_oldGuestMsg(m);}
+};
+
+function uiDraw(iAmDrawer){
+  S.phase='draw';
+  render(el=>{
+    el.innerHTML=`
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h2>Round ${S.draw.displayRound}/${S.draw.total}</h2>
+    <div class="timer" id="t">--:--</div>
+  </div>
+  <div class="note" id="drawword">${iAmDrawer?('Tumhara word: '+(S.draw.myword||'...')):(esc(pnameSafe(S.draw.drawer))+' draw kar raha/rahi hai. Guess karo!')}</div>
+  <canvas id="cv" class="drawbox" width="380" height="320"></canvas>
+  ${iAmDrawer?`
+  <div class="toolrow">
+    <div class="swatches">${DRAW_COLORS.map(c=>`<div class="swatch${c==='#2b2620'?' sel':''}" data-c="${c}" style="background:${c}"></div>`).join('')}</div>
+  </div>
+  <div class="toolrow">
+    <button class="btn ghost" id="thin" style="width:auto;padding:8px 14px">Patla</button>
+    <button class="btn ghost" id="thick" style="width:auto;padding:8px 14px">Motaa</button>
+    <button class="btn ghost" id="clearcv" style="width:auto;padding:8px 14px">Saaf karo</button>
+    <button class="btn" id="done" style="width:auto;padding:8px 14px">Ho gaya</button>
+  </div>`:''}
+</div>
+<div class="card">
+  <div id="drawscores" class="players"></div>
+  <div class="chatlog" id="chatlog"></div>
+  <div class="chatrow"><input id="chatin" maxlength="140" placeholder="${iAmDrawer?'Baat karo...':'Apna guess likho...'}"><button class="btn" id="sendchat">Bhejo</button></div>
+</div>`;
+    wireDrawCanvas(iAmDrawer);
+    wireDrawChat(iAmDrawer);
+    startTimer(()=>{if(S.isHost)endDrawRound('time');});
+  });
+}
+function pnameSafe(id){const p=S.players.find(p=>p.id===id);return p?p.name:'Player';}
+function wireDrawChat(iAmDrawer){
+  const inp=$('#chatin');
+  const go=()=>{const v=inp.value.trim();if(!v)return;inp.value='';
+    if(S.isHost){
+      if(!onDrawGuess('host',v))bcast({t:'chat',name:S.players[0].name,text:v.slice(0,140)});
+    } else {
+      S.conn&&S.conn.send({t:'guess',text:v});
+    }};
+  $('#sendchat').addEventListener('click',go);
+  inp.addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+}
+function wireDrawCanvas(iAmDrawer){
+  const cv=$('#cv');if(!cv)return;
+  const ctx=cv.getContext('2d');ctx.lineCap='round';ctx.lineJoin='round';
+  if(!iAmDrawer){cv.style.cursor='default';return;}
+  let last=null;
+  const pos=e=>{const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*(cv.width/r.width),y:(e.clientY-r.top)*(cv.height/r.height)};};
+  const stroke=(type,p)=>{
+    const msg={t:'stroke',type,x:Math.round(p.x),y:Math.round(p.y),color:S.draw.color,size:S.draw.size};
+    paintStroke(msg);
+    if(S.isHost)bcastRaw(msg);else S.conn&&S.conn.send(msg);
+  };
+  cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);S.draw.drawing=true;last=pos(e);stroke('start',last);});
+  cv.addEventListener('pointermove',e=>{if(!S.draw.drawing)return;const p=pos(e);stroke('move',p);last=p;});
+  const up=e=>{if(!S.draw.drawing)return;S.draw.drawing=false;stroke('end',last||pos(e));};
+  cv.addEventListener('pointerup',up);cv.addEventListener('pointercancel',up);
+  document.querySelectorAll('.swatch').forEach(sw=>sw.addEventListener('click',()=>{
+    document.querySelectorAll('.swatch').forEach(x=>x.classList.remove('sel'));sw.classList.add('sel');S.draw.color=sw.getAttribute('data-c');}));
+  $('#thin').addEventListener('click',()=>{S.draw.size=3;});
+  $('#thick').addEventListener('click',()=>{S.draw.size=9;});
+  $('#clearcv').addEventListener('click',()=>{ctx.clearRect(0,0,cv.width,cv.height);const m={t:'clearcanvas'};if(S.isHost)bcastRaw(m);else S.conn&&S.conn.send(m);});
+  $('#done').addEventListener('click',()=>{if(S.isHost)endDrawRound('done');else S.conn&&S.conn.send({t:'drawdone'});});
+}
+function bcastRaw(msg){Object.values(S.conns).forEach(c=>send(c,msg));}
+function paintStroke(m){
+  const cv=$('#cv');if(!cv)return;
+  const ctx=cv.getContext('2d');
+  ctx.strokeStyle=m.color||'#2b2620';ctx.lineWidth=m.size||4;ctx.lineCap='round';ctx.lineJoin='round';
+  if(m.type==='start'){ctx.beginPath();ctx.moveTo(m.x,m.y);ctx.lineTo(m.x+0.1,m.y+0.1);ctx.stroke();}
+  else if(m.type==='move'){ctx.lineTo(m.x,m.y);ctx.stroke();}
+  else if(m.type==='end'){ctx.closePath();}
+}
+function renderDrawScores(sc){
+  const d=$('#drawscores');if(!d)return;
+  d.innerHTML=sc.map(p=>`<div class="pill"><span class="dot"></span>${esc(p.name)}<span class="me">${p.score} pts</span></div>`).join('');
+}
+function showDrawEnd(word){
+  const w=$('#drawword');if(w)w.textContent='Word tha: '+word+'. Agla round aa raha hai...';
+}
+function uiDrawFinal(sc){
+  S.phase='drawfinal';
+  render(el=>{
+    const top=sc[0];
+    el.innerHTML=`
+<div class="card" style="text-align:center;gap:12px">
+  <div class="big-emoji">${ICONS.party}</div>
+  <div class="result-win">${esc(top.name)} jeet gaye!</div>
+</div>
+<div class="card"><h2>Final scores</h2><div class="players">
+${sc.map((p,i)=>`<div class="pill"><span class="dot"></span>${i+1}. ${esc(p.name)}<span class="me">${p.score} pts</span></div>`).join('')}
+</div></div>
+${S.isHost?'<button class="btn" id="again">Naya game (lobby wapas)</button>':''}
+<button class="btn ghost" id="leave">Room chhodo</button>`;
+    $('#again')?.addEventListener('click',()=>{bcastLobby();bcast({t:'backtolobby'});uiLobby();});
+    $('#leave').addEventListener('click',()=>{try{S.peer&&S.peer.destroy();}catch(e){}location.reload();});
   });
 }
 
