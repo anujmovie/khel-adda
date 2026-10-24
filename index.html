@@ -170,12 +170,15 @@ function handleGuestData(conn,msg){
   else if(msg.t==='drawdone'){if(conn.peer===S.draw.drawer)endDrawRound('done');}
   else if(msg.t==='ludo-roll'){if(S.ludo&&S.ludo.st.winner<0&&S.ludo.st.turn===ludoSeatOf(conn.peer))hostLudoRoll();}
   else if(msg.t==='ludo-move'){if(S.ludo&&S.ludo.st.winner<0&&S.ludo.st.turn===ludoSeatOf(conn.peer))hostLudoMove(S.ludo.st.turn,msg.token|0);}
+  else if(msg.t==='jak-play'){if(S.jak&&S.jak.st.winner<0&&S.jak.st.turn===jakSeatOf(conn.peer))hostJakPlay(jakSeatOf(conn.peer),msg.play);}
+  else if(msg.t==='jak-burn'){if(S.jak&&S.jak.st.winner<0&&S.jak.st.turn===jakSeatOf(conn.peer))hostJakBurn(jakSeatOf(conn.peer),String(msg.card||''));}
   else if(msg.t==='stroke'||msg.t==='clearcanvas'){if(conn.peer===S.draw.drawer){bcastRaw(msg);}}
 }
 function onConnClosed(conn){
   const i=S.players.findIndex(p=>p.id===conn.peer);
   const nm=i>=0?S.players[i].name:'';
   if(S.ludo&&S.ludo.st.winner<0){setTimeout(()=>{ludoSkipGone();bcastLudo((nm||'Player')+' ka connection gaya; uski turn skip hogi.');uiLudo();},300);}
+  if(S.jak&&S.jak.st.winner<0){setTimeout(()=>jakAutoGone(),400);}
   delete S.conns[conn.peer];
   if(S.calls[conn.peer]){delete S.calls[conn.peer];delete S.voicePeers[conn.peer];syncVoiceUI();}
   if(i>0){S.players.splice(i,1);bcast({t:'sys',text:nm+' chala gaya'});bcastLobby();if(S.phase==='lobby')uiLobby();}
@@ -257,6 +260,8 @@ function onGuestMsg(m){
   else if(m.t==='result'){uiResult(m);}
   else if(m.t==='spyguesstime'){uiSpyGuessWait(m.spyName);}
   else if(m.t==='ludo-state'){S.ludo={st:m.st,seats:m.seats,lastDice:m.lastDice};S.phase='ludo';uiLudo(m.note);}
+  else if(m.t==='jak-state'){if(!S.jak)S.jak={sel:{}};S.jak.st=jakStateFromPub(m.pub,S.jak.st);S.jak.seats=m.seats;S.phase='jak';uiJak(m.note);}
+  else if(m.t==='jak-hand'){if(S.jak){S.jak.myHand=m.hand;S.jak.myPlaysFromHost=m.plays;if(S.phase==='jak')uiJak(S.jak.note);}}
 }
 
 /* ---------- JOIN WAIT ---------- */
@@ -293,6 +298,7 @@ ${S.isHost?`
     <button class="btn" id="tab-spy">Kaun Spy Hai</button>
     <button class="btn ghost" id="tab-draw">Banao aur Guess Karo</button>
     <button class="btn ghost" id="tab-ludo">Ludo</button>
+    <button class="btn ghost" id="tab-jak">Jackaroo</button>
   </div>
   <div id="spysettings">
   <label>Word pack</label>
@@ -313,14 +319,14 @@ ${S.isHost?`
 });}
 function wireGameTabs(){
   let sel='spy';
-  const tabs={spy:$('#tab-spy'),draw:$('#tab-draw'),ludo:$('#tab-ludo')};
-  const lim={spy:[3,8],draw:[2,8],ludo:[2,4]};
+  const tabs={spy:$('#tab-spy'),draw:$('#tab-draw'),ludo:$('#tab-ludo'),jak:$('#tab-jak')};
+  const lim={spy:[3,8],draw:[2,8],ludo:[2,4],jak:[4,4]};
   const paint=()=>{
     for(const k in tabs)tabs[k].className='btn '+(sel===k?'':'ghost');
     $('#spysettings').style.display=sel==='spy'?'':'none';
     const b=$('#start');const n=S.players.length;const lims=lim[sel];
     if(b){b.disabled=n<lims[0]||n>lims[1];b.textContent=(n<lims[0]||n>lims[1])?('Game shuru karo ('+lims[0]+'-'+lims[1]+' players)'):'Game shuru karo';}
-    const gn=$('#gamenote');const notes={spy:'Kaun Spy Hai: 3-8 players.',draw:'Banao aur Guess Karo: 2-8 players.',ludo:'Ludo: 2-4 players.'};
+    const gn=$('#gamenote');const notes={spy:'Kaun Spy Hai: 3-8 players.',draw:'Banao aur Guess Karo: 2-8 players.',ludo:'Ludo: 2-4 players.',jak:'Jackaroo: theek 4 players, 2v2 teams (Gulf style).'};
     if(gn)gn.textContent=notes[sel]+' Sab ke phones par sync hota hai.';
   };
   for(const k in tabs)tabs[k].addEventListener('click',()=>{sel=k;paint();});
@@ -328,6 +334,7 @@ function wireGameTabs(){
   return ()=>sel;
 }
 function startGame(){
+  if(window._gameSel&&window._gameSel()==='jak'){startJakGame();return;}
   if(window._gameSel&&window._gameSel()==='ludo'){startLudoGame();return;}
   if(window._gameSel&&window._gameSel()==='draw'){startDrawGame();return;}
   S.pack=$('#pack').value;S.minutes=parseInt($('#minutes').value,10);
@@ -1028,6 +1035,474 @@ function ludoSkipGone(){
     skipped.push(ludoSeatName(st.turn));
     st.turn=(st.turn+1)%st.n;st.phase='roll';st.dice=null;st.sixes=0;
   }
+}
+
+
+/* Khel Adda Jackaroo engine - Jawaker-rules variant (Gulf style).
+   4 seats, 2 teams (0+2 vs 1+3). 52-card deck, 4 marbles each.
+   Ring: 52 cells, seat starts 0/13/26/39. Safe zone: 4 cells (52..55), exact entry, no overshoot.
+   Sources: https://blog.jawaker.com/en/jackaroo-rules-en/ (+ block/base detail from stephen.shawweb.co.uk/jakaro.html)
+   Cards: A=out|1|11, K=out, Q=12, J=swap, 7=split over two own pieces, 4=back 4 (no capture), others=face.
+   Base cell: own piece on own base is untouchable and blocks everyone. Two consecutive own pieces:
+   the front one is protected like a base (cannot be bypassed/killed/swapped).
+   Own pieces cannot be jumped; single unprotected enemy can be jumped; protected cannot.
+   No legal move with any card => must burn one card. Team with all 8 in safe zones wins. */
+var JAK=(function(){
+  const STARTS={0:0,1:13,2:26,3:39};
+  const RING=52, SAFE0=52, SAFE_N=4, DONE=56;
+  const TEAM=s=>s%2;
+  const PARTNER=s=>(s+2)%4;
+
+  function newGame(rng){
+    rng=rng||Math.random;
+    const st={tokens:[0,1,2,3].map(()=>[-1,-1,-1,-1]),hands:[[],[],[],[]],deck:[],fire:[],dealer:3,turn:0,winner:-1,log:[]};
+    deal(st,rng);
+    return st;
+  }
+  function shuffledDeck(rng){
+    const suits=['S','H','D','C'],ranks=['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+    const d=[];for(const s of suits)for(const r of ranks)d.push(r+s);
+    for(let i=d.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[d[i],d[j]]=[d[j],d[i]];}
+    return d;
+  }
+  function deal(st,rng){
+    rng=rng||Math.random;
+    if(st.deck.length<16){st.deck=shuffledDeck(rng).concat(st.deck);st.fire=[];}
+    st.dealer=(st.dealer+1)%4;
+    for(let s=0;s<4;s++)st.hands[s]=st.deck.splice(0,4);
+    st.turn=(st.dealer+1)%4;
+    st.log.push('deal: dealer='+st.dealer);
+  }
+  const abs=(seat,p)=>(STARTS[seat]+p)%RING;
+  const rank=c=>c.slice(0,-1);
+  const onRing=(st,s,t)=>{const p=st.tokens[s][t];return p>=0&&p<RING;};
+  const doneAll=(st,s)=>st.tokens[s].every(p=>p>=SAFE0);
+  // effective seat whose pieces the player moves (partner play after finishing)
+  function effSeat(st,seat){return doneAll(st,seat)?PARTNER(seat):seat;}
+  function baseProtected(st,seat,t){ // own piece on own base cell
+    const p=st.tokens[seat][t];return p===0; // p=0 sits on own base cell
+  }
+  function blockFront(st,seat,t){ // this piece is the front of two consecutive own pieces
+    const p=st.tokens[seat][t];if(p<1||p>=RING)return false;
+    return st.tokens[seat].some((q,i)=>i!==t&&q===p-1);
+  }
+  function protectedPiece(st,seat,t){return baseProtected(st,seat,t)||blockFront(st,seat,t);}
+  function pieceAtAbs(st,a){ // returns {seat,t} at absolute ring cell or null
+    for(let s=0;s<4;s++)for(let t=0;t<4;t++){const p=st.tokens[s][t];if(p>=0&&p<RING&&abs(s,p)===a)return {seat:s,t};}
+    return null;
+  }
+  function pathBlocked(st,seat,fromP,steps){
+    for(let k=1;k<steps;k++){
+      const p=fromP+k;if(p>=RING)break; // enters safe zone, no blockers there
+      const a=abs(seat,p);const occ=pieceAtAbs(st,a);
+      if(!occ)continue;
+      if(occ.seat===seat)return true;                       // cannot jump own
+      if(protectedPiece(st,occ.seat,occ.t))return true;     // cannot bypass protected enemy
+    }
+    return false;
+  }
+  function fwdLegal(st,seat,t,steps){
+    const p=st.tokens[seat][t];
+    if(p===-1)return false;
+    const np=p+steps;
+    if(np>=DONE)return false; // safe zone 52..55, no overshoot
+    if(np>=SAFE0){ // landing inside safe zone: no stacking own piece
+      if(st.tokens[seat].some((q,i)=>i!==t&&q===np))return false;
+      if(p>=SAFE0)return true; // interior zone move, no track blockers
+    }
+    if(p<RING){
+      if(pathBlocked(st,seat,p,steps))return false;
+      if(np<RING){
+        const occ=pieceAtAbs(st,abs(seat,np));
+        if(occ){
+          if(occ.seat===seat)return false;                    // no stacking own
+          if(protectedPiece(st,occ.seat,occ.t))return false;  // cannot land on protected
+        }
+      }
+    }
+    return true;
+  }
+  function outLegal(st,seat){ // A or K brings a piece out onto own base cell
+    if(!st.tokens[seat].some(p=>p===-1))return false;
+    const occ=pieceAtAbs(st,STARTS[seat]);
+    if(!occ)return true;
+    if(occ.seat===seat)return false;                        // own piece on base already
+    if(protectedPiece(st,occ.seat,occ.t))return false;      // enemy sitting on their? cannot be their base (it's ours); block-front enemy can't be captured
+    return true;
+  }
+  function backLegal(st,seat,t,steps){
+    const p=st.tokens[seat][t];
+    if(p<=0||p>=RING)return false;                          // only track pieces move backward
+    const np=p-steps;if(np<0)return false;
+    const occ=pieceAtAbs(st,abs(seat,np));
+    return !occ;                                            // backward landing must be empty (no capture)
+  }
+  function swapTargets(st,seat,t){
+    const p=st.tokens[seat][t];
+    if(!(p>0&&p<RING))return [];                            // own piece on plain track (not own base)
+    const out=[];
+    for(let s=0;s<4;s++){if(s===seat||TEAM(s)===TEAM(seat))continue;
+      for(let e=0;e<4;e++){const q=st.tokens[s][e];if(q>0&&q<RING&&!protectedPiece(st,s,e))out.push({seat:s,t:e});}}
+    return out;
+  }
+  // enumerate legal plays: {card, kind, t?, steps?, t2?, steps2?, target?}
+  function legalPlays(st,seat){
+    const es=effSeat(st,seat);const plays=[];
+    for(const card of st.hands[seat]){
+      const r=rank(card);
+      if(r==='A'){
+        if(outLegal(st,es))plays.push({card,kind:'out'});
+        for(let t=0;t<4;t++){if(fwdLegal(st,es,t,1))plays.push({card,kind:'fwd',t,steps:1});if(fwdLegal(st,es,t,11))plays.push({card,kind:'fwd',t,steps:11});}
+      }else if(r==='K'){
+        if(outLegal(st,es))plays.push({card,kind:'out'});
+      }else if(r==='J'){
+        for(let t=0;t<4;t++)for(const tg of swapTargets(st,es,t))plays.push({card,kind:'swap',t,target:tg});
+      }else if(r==='7'){
+        for(let a=0;a<4;a++)for(let b=0;b<4;b++){
+          if(a===b)continue;
+          for(let s1=1;s1<=6;s1++){
+            const s2=7-s1;
+            if(fwdLegal(st,es,a,s1)&&fwdLegalAfter(st,es,a,s1,b,s2))plays.push({card,kind:'split',t:a,steps:s1,t2:b,steps2:s2});
+          }
+        }
+      }else if(r==='4'){
+        for(let t=0;t<4;t++)if(backLegal(st,es,t,4))plays.push({card,kind:'back',t,steps:4});
+      }else{
+        const v=r==='Q'?12:r==='10'?10:parseInt(r,10);
+        for(let t=0;t<4;t++)if(fwdLegal(st,es,t,v))plays.push({card,kind:'fwd',t,steps:v});
+      }
+    }
+    return plays;
+  }
+  // simulate piece a moving s1 (incl. capture) then check piece b s2
+  function fwdLegalAfter(st,es,a,s1,b,s2){
+    const sim=JSON.parse(JSON.stringify(st.tokens));
+    applyFwdTokens(sim,st,es,a,s1);
+    const st2={tokens:sim};
+    return fwdLegal(st2,es,b,s2);
+  }
+  function applyFwdTokens(tokens,stFull,seat,t,steps,caps){
+    const p=tokens[seat][t];const np=p+steps;tokens[seat][t]=np;
+    if(np<RING){
+      const a=(STARTS[seat]+np)%RING;
+      for(let s=0;s<4;s++){if(s===seat)continue;
+        for(let e=0;e<4;e++){const q=tokens[s][e];
+          if(q>=0&&q<RING&&(STARTS[s]+q)%RING===a){tokens[s][e]=-1;if(caps)caps.push({t:'capture',seat:s,token:e});}}}
+    }
+  }
+  function removeCard(st,seat,card){const i=st.hands[seat].indexOf(card);st.hands[seat].splice(i,1);st.fire.push(card);}
+  function play(st,seat,play){
+    if(st.winner>=0||seat!==st.turn)return {ok:false};
+    const legal=legalPlays(st,seat);
+    const match=legal.some(p=>JSON.stringify(p)===JSON.stringify(play));
+    if(!match)return {ok:false,why:'illegal'};
+    const es=effSeat(st,seat);const ev={ok:true,events:[]};
+    removeCard(st,seat,play.card);
+    if(play.kind==='out'){
+      const t=st.tokens[es].indexOf(-1);
+      const occ=pieceAtAbs(st,STARTS[es]);
+      if(occ){st.tokens[occ.seat][occ.t]=-1;ev.events.push({t:'capture',seat:occ.seat,token:occ.t});}
+      st.tokens[es][t]=0;ev.events.push({t:'out',seat:es,token:t});
+    }else if(play.kind==='fwd'){
+      const from=st.tokens[es][play.t];
+      const caps=[];
+      applyFwdTokens(st.tokens,st,es,play.t,play.steps,caps);
+      ev.events.push({t:'move',seat:es,token:play.t,from,to:st.tokens[es][play.t]});
+      ev.events=ev.events.concat(caps);
+    }else if(play.kind==='back'){
+      const from=st.tokens[es][play.t];st.tokens[es][play.t]=from-play.steps;
+      ev.events.push({t:'move',seat:es,token:play.t,from,to:from-play.steps,back:true});
+    }else if(play.kind==='swap'){
+      const tgt=play.target;const p1=st.tokens[es][play.t],p2=st.tokens[tgt.seat][tgt.t];
+      st.tokens[es][play.t]=p2;st.tokens[tgt.seat][tgt.t]=p1;
+      ev.events.push({t:'swap',seat:es,token:play.t,with:tgt});
+    }else if(play.kind==='split'){
+      const caps=[];
+      const f1=st.tokens[es][play.t];
+      applyFwdTokens(st.tokens,st,es,play.t,play.steps,caps);
+      ev.events.push({t:'move',seat:es,token:play.t,from:f1,to:st.tokens[es][play.t]});
+      const f2=st.tokens[es][play.t2];
+      applyFwdTokens(st.tokens,st,es,play.t2,play.steps2,caps);
+      ev.events.push({t:'move',seat:es,token:play.t2,from:f2,to:st.tokens[es][play.t2]});
+      ev.events=ev.events.concat(caps);
+    }
+    // win check
+    for(const s of [0,1,2,3]){if(doneAll(st,s)&&doneAll(st,PARTNER(s))){st.winner=TEAM(s);ev.events.push({t:'win',team:st.winner});}}
+    // advance turn
+    if(st.winner<0){
+      st.turn=(st.turn+1)%4;
+      if(st.hands.every(h=>h.length===0)){ev.events.push({t:'redeal'});} // host deals with rng
+    }
+    return ev;
+  }
+  function burn(st,seat,card){
+    if(st.winner>=0||seat!==st.turn)return {ok:false};
+    if(!st.hands[seat].includes(card))return {ok:false};
+    if(legalPlays(st,seat).length>0)return {ok:false,why:'has-legal-move'};
+    removeCard(st,seat,card);
+    st.turn=(st.turn+1)%4;
+    const ev={ok:true,events:[{t:'burn',seat,card}]};
+    if(st.hands.every(h=>h.length===0))ev.events.push({t:'redeal'});
+    return ev;
+  }
+  return {newGame,deal,legalPlays,play,burn,effSeat,doneAll,STARTS,RING,SAFE0,DONE,TEAM,PARTNER,abs,rank,protectedPiece};
+})();
+if(typeof module!=='undefined')module.exports=JAK;
+
+/* ---------- JACKAROO (Jawaker variant) ---------- */
+const JAK_RING=(()=>{const c=[];for(let x=1;x<=13;x++)c.push([14,x]);for(let y=13;y>=1;y--)c.push([y,14]);for(let x=13;x>=1;x--)c.push([0,x]);for(let y=1;y<=13;y++)c.push([y,0]);return c;})();
+const JAK_SAFE={0:[[13,1],[12,1],[11,1],[10,1]],1:[[13,13],[13,12],[13,11],[13,10]],2:[[1,13],[2,13],[3,13],[4,13]],3:[[1,1],[2,1],[3,1],[4,1]]};
+const JAK_HOME={0:[[11,2],[11,3],[12,2],[12,3]],1:[[3,11],[3,12],[4,11],[4,12]],2:[[1,10],[1,11],[2,10],[2,11]],3:[[10,1],[10,2],[11,1],[11,2]]};
+const JAK_BASE={0:[14,1],1:[13,14],2:[0,13],3:[1,0]};
+const JAK_COLOR=['#c25b4e','#3f6fb5','#c9a227','#5f9c8a'];
+const JAK_LIGHT=['#f2d9d5','#d8e3f2','#f2e8c8','#dcede7'];
+const JAK_TEAMNAME=['Laal+Sunehra','Neela+Hara'];
+
+
+function jakStateFromPub(pub,prev){
+  // guests keep only counts of others' hands; their own full hand via jak-hand
+  const hands=(prev&&prev.hands)?prev.hands:[[],[],[],[]];
+  const h=pub.hands.map((n,i)=>{const old=hands[i]||[];return old.length===n?old:Array.from({length:n},(_,k)=>'?'+k);});
+  return {tokens:pub.tokens,turn:pub.turn,dealer:pub.dealer,winner:pub.winner,hands:h,deck:[],fire:[],log:[]};
+}
+function jakSeatOf(pid){return S.jak?S.jak.seats.indexOf(pid):-1;}
+function jakTokenXY(seat,p){
+  if(p===-1)return null;
+  if(p<52){return JAK_RING[(JAK.STARTS[seat]+p)%52];}
+  return JAK_SAFE[seat][Math.min(p-52,3)];
+}
+function jakCardLabel(c){const r=JAK.rank(c);const suit=c.slice(-1);const sym={S:'♠',H:'♥',D:'♦',C:'♣'}[suit];const col=(suit==='H'||suit==='D')?'#c25b4e':'#2b2620';return {txt:r+sym,col};}
+function jakBoardSVG(){
+  let cells='';
+  for(let i=0;i<52;i++){const [r,c]=JAK_RING[i];
+    cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="#fff" stroke="#cfc8bc" stroke-width="0.05"/>`;}
+  for(let s=0;s<4;s++){
+    const [br,bc]=JAK_BASE[s];
+    cells+=`<rect x="${bc}" y="${br}" width="1" height="1" fill="${JAK_COLOR[s]}" stroke="#cfc8bc" stroke-width="0.05"/>`;
+    for(const [r,c] of JAK_SAFE[s])cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="${JAK_LIGHT[s]}" stroke="${JAK_COLOR[s]}" stroke-width="0.06"/>`;
+    for(const [r,c] of JAK_HOME[s])cells+=`<circle cx="${c+0.5}" cy="${r+0.5}" r="0.42" fill="${JAK_LIGHT[s]}" stroke="${JAK_COLOR[s]}" stroke-width="0.07"/>`;
+  }
+  cells+=`<text x="7.5" y="8.1" font-size="0.9" text-anchor="middle" fill="#7a7268">JACKAROO</text>`;
+  return cells;
+}
+function jakTokensSVG(){
+  const st=S.jak.st;const cellMap={};const out=[];
+  const myPlays=jakMyPlays();
+  for(let s=0;s<4;s++)for(let i=0;i<4;i++){
+    const p=st.tokens[s][i];
+    let xy;
+    if(p===-1)xy=JAK_HOME[s][i];
+    else xy=jakTokenXY(s,p);
+    const key=xy[0].toFixed(1)+','+xy[1].toFixed(1);
+    cellMap[key]=cellMap[key]||0;const k=cellMap[key]++;
+    const off=k===0?[0,0]:[[0.14,0.14],[-0.14,-0.14],[0.14,-0.14]][(k-1)%3];
+    const y=xy[0]+0.5+off[0],x=xy[1]+0.5+off[1];
+    let playable=false,swappable=false;
+    if(myPlays){
+      playable=myPlays.some(pl=>(pl.kind==='fwd'||pl.kind==='back')&&pl.t===i&&jakEffSeat()===s)||myPlays.some(pl=>pl.kind==='out'&&jakEffSeat()===s&&S.jak.st.tokens[s][i]===-1)||myPlays.some(pl=>pl.kind==='split'&&(pl.t===i&&S.jak.sel.splitStep===undefined||pl.t2===i&&S.jak.sel.splitStep!==undefined)&&jakEffSeat()===s);
+      swappable=S.jak.sel.card&&JAK.rank(S.jak.sel.card)==='J'&&S.jak.sel.t!==undefined&&myPlays.some(pl=>pl.kind==='swap'&&pl.target&&pl.target.seat===s&&pl.target.t===i);
+      if(S.jak.sel.card&&JAK.rank(S.jak.sel.card)==='J'&&S.jak.sel.t===undefined)playable=myPlays.some(pl=>pl.kind==='swap'&&pl.t===i&&jakEffSeat()===s);
+    }
+    const cls=swappable?'swappable':(playable?'playable':'');
+    out.push(`<circle cx="${x}" cy="${y}" r="0.34" fill="${JAK_COLOR[s]}" stroke="${cls?'#2b2620':'#fff'}" stroke-width="${cls?0.12:0.05}" data-jseat="${s}" data-jtok="${i}" class="jtok ${cls}" style="cursor:${cls?'pointer':'default'}"/>`);
+  }
+  return out.join('');
+}
+function jakEffSeat(){return S.jak?JAK.effSeat(S.jak.st,jakSeatOf(S.me.id)):-1;}
+function jakMyPlays(){
+  if(!S.jak||!S.jak.st||S.jak.st.winner>=0)return null;
+  const seat=jakSeatOf(S.me.id);
+  if(seat<0||S.jak.st.turn!==seat)return null;
+  if(!S.isHost&&!S.jak.myHand)return null;
+  if(!S.jak.sel.card)return null;
+  const all=S.jak.playsCache||[];
+  return all.filter(p=>p.card===S.jak.sel.card);
+}
+function jakComputePlays(){
+  const seat=jakSeatOf(S.me.id);
+  if(seat<0||S.jak.st.turn!==seat){S.jak.playsCache=[];return;}
+  if(S.isHost){S.jak.playsCache=JAK.legalPlays(S.jak.st,seat);}
+  else{S.jak.playsCache=S.jak.myPlaysFromHost||[];}
+}
+function uiJak(note){
+  S.phase='jak';showVoiceBar();jakComputePlays();
+  const st=S.jak.st;const mySeat=jakSeatOf(S.me.id);
+  const isMyTurn=st.turn===mySeat&&st.winner<0;
+  const hand=S.isHost?st.hands[mySeat]:(S.jak.myHand||[]);
+  const counts=st.hands.map(h=>h.length);
+  const seatName=s=>{const pid=S.jak.seats[s];const p=S.players.find(x=>x.id===pid);return (p?p.name:'?')+(pid===S.me.id?' (tum)':'');};
+  let status;
+  if(st.winner>=0)status='Team <b>'+JAK_TEAMNAME[st.winner]+'</b> jeet gayi! 🎉';
+  else if(isMyTurn)status='Tumhari turn - card chuno';
+  else status=esc(seatName(st.turn))+' ki turn';
+  render(el=>{el.innerHTML=`
+<div class="card">
+  <h2>Jackaroo <span style="font-size:12px;color:var(--muted)">Gulf style · teams</span></h2>
+  <div class="note">${status}</div>
+  <svg viewBox="0 0 15 15" style="width:100%;max-width:430px;display:block;margin:0 auto;touch-action:manipulation">${jakBoardSVG()}${jakTokensSVG()}</svg>
+  <div class="note" style="text-align:center;margin-top:6px">${[0,1,2,3].map(s=>`<span style="color:${JAK_COLOR[s]}">●</span> ${esc(seatName(s))} (${counts[s]})`).join(' · ')}</div>
+  <div class="note" style="text-align:center">Team: <span style="color:${JAK_COLOR[0]}">●</span>+<span style="color:${JAK_COLOR[2]}">●</span> vs <span style="color:${JAK_COLOR[1]}">●</span>+<span style="color:${JAK_COLOR[3]}">●</span></div>
+  ${note?`<div class="note" style="text-align:center;margin-top:6px">${esc(note)}</div>`:''}
+  <div id="jak-hand" style="display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap">
+    ${hand.map(c=>{const l=jakCardLabel(c);const selCard=S.jak.sel.card===c;const dis=!isMyTurn;return `<button class="jcard${selCard?' sel':''}" data-jcard="${c}" ${dis?'disabled':''} style="min-width:52px;padding:10px 6px;font-size:18px;font-weight:700;border-radius:8px;border:2px solid ${selCard?'#2b2620':'var(--line)'};background:${selCard?'#efe9df':'#fff'};color:${l.col};opacity:${dis?0.6:1}">${l.txt}</button>`;}).join('')}
+  </div>
+  <div id="jak-opts" style="display:flex;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap"></div>
+  ${isMyTurn&&jakMyPlays()&&jakMyPlays().length===0&&S.jak.sel.card?'<div class="note" style="text-align:center;color:var(--red)">Is card se koi move nahi - doosra card chuno ya burn karo</div>':''}
+  ${isMyTurn&&(S.jak.playsCache||[]).length===0?'<button class="btn danger" id="jak-burn" style="margin-top:8px">Koi move nahi - ek card burn karo</button>':''}
+  ${st.winner>=0&&S.isHost?'<button class="btn" id="jak-again" style="margin-top:10px">Phir se khelo</button>':''}
+</div>`;
+    el.querySelectorAll('.jcard').forEach(b=>b.addEventListener('click',()=>{
+      const c=b.dataset.jcard;
+      S.jak.sel={card:S.jak.sel.card===c?undefined:c};
+      uiJak(S.jak.note);
+    }));
+    el.querySelectorAll('.jtok.playable,.jtok.swappable').forEach(t=>t.addEventListener('click',()=>{
+      jakOnTokenTap(parseInt(t.dataset.jseat,10),parseInt(t.dataset.jtok,10));
+    }));
+    const burn=$('#jak-burn');if(burn)burn.addEventListener('click',()=>{jakDoBurn();});
+    const ag=$('#jak-again');if(ag)ag.addEventListener('click',()=>{startJakGame();});
+    jakRenderOpts();
+  });
+}
+function jakRenderOpts(){
+  const box=$('#jak-opts');if(!box)return;
+  const sel=S.jak.sel;const plays=jakMyPlays()||[];
+  const opts=[];
+  if(sel.card&&(JAK.rank(sel.card)==='A'||JAK.rank(sel.card)==='K')){
+    if(plays.some(p=>p.kind==='out'))opts.push({k:'out',label:'Bahar nikalo'});
+  }
+  if(sel.card&&JAK.rank(sel.card)==='A'){
+    if(plays.some(p=>p.kind==='fwd'&&p.steps===1))opts.push({k:'steps',v:1,label:'1 aage'});
+    if(plays.some(p=>p.kind==='fwd'&&p.steps===11))opts.push({k:'steps',v:11,label:'11 aage'});
+  }
+  if(sel.card&&JAK.rank(sel.card)==='7'&&sel.t!==undefined&&sel.splitStep===undefined){
+    for(let s1=1;s1<=6;s1++)if(plays.some(p=>p.t===sel.t&&p.steps===s1))opts.push({k:'split',v:s1,label:s1+' + '+(7-s1)});
+  }
+  box.innerHTML=opts.map((o,i)=>`<button class="btn ghost" style="width:auto;padding:8px 14px" data-jopt="${i}">${o.label}</button>`).join('');
+  box.querySelectorAll('[data-jopt]').forEach(b=>b.addEventListener('click',()=>{
+    const o=opts[parseInt(b.dataset.jopt,10)];
+    if(o.k==='out')jakSubmit({card:sel.card,kind:'out'});
+    else if(o.k==='steps'){S.jak.sel.aceSteps=o.v;uiJak(S.jak.note);}
+    else if(o.k==='split'){S.jak.sel.splitStep=o.v;uiJak(S.jak.note);}
+  }));
+}
+function jakOnTokenTap(seat,tok){
+  const sel=S.jak.sel;const plays=jakMyPlays()||[];if(!sel.card)return;
+  const es=jakEffSeat();
+  const r=JAK.rank(sel.card);
+  if(r==='J'){
+    if(sel.t===undefined){if(plays.some(p=>p.kind==='swap'&&p.t===tok&&seat===es)){S.jak.sel.t=tok;uiJak(S.jak.note);}return;}
+    const pl=plays.find(p=>p.kind==='swap'&&p.t===sel.t&&p.target.seat===seat&&p.target.t===tok);
+    if(pl)jakSubmit(pl);
+    return;
+  }
+  if(seat!==es)return;
+  if(r==='7'){
+    if(sel.splitStep===undefined){if(plays.some(p=>p.t===tok)){S.jak.sel.t=tok;uiJak(S.jak.note);}return;}
+    const pl=plays.find(p=>p.t===sel.t&&p.steps===sel.splitStep&&p.t2===tok);
+    if(pl)jakSubmit(pl);
+    return;
+  }
+  if(r==='A'){
+    const steps=sel.aceSteps;
+    if(!steps)return;
+    const pl=plays.find(p=>p.kind==='fwd'&&p.t===tok&&p.steps===steps);
+    if(pl)jakSubmit(pl);
+    return;
+  }
+  const pl=plays.find(p=>(p.kind==='fwd'||p.kind==='back')&&p.t===tok);
+  if(pl)jakSubmit(pl);
+}
+function jakSubmit(play){
+  if(S.isHost){hostJakPlay(jakSeatOf(S.me.id),play);}
+  else if(S.conn&&S.conn.open)S.conn.send({t:'jak-play',play});
+  S.jak.sel={};
+}
+function jakDoBurn(){
+  const hand=S.isHost?S.jak.st.hands[jakSeatOf(S.me.id)]:(S.jak.myHand||[]);
+  if(!hand.length)return;
+  const card=S.jak.sel.card||hand[0];
+  if(S.isHost)hostJakBurn(jakSeatOf(S.me.id),card);
+  else if(S.conn&&S.conn.open)S.conn.send({t:'jak-burn',card});
+  S.jak.sel={};
+}
+function jakPub(st){return {tokens:st.tokens,turn:st.turn,dealer:st.dealer,winner:st.winner,hands:st.hands.map(h=>h.length)};}
+function jakSendHands(){
+  for(let s=0;s<4;s++){
+    const pid=S.jak.seats[s];
+    const plays=JAK.legalPlays(S.jak.st,s);
+    const msg={t:'jak-hand',hand:S.jak.st.hands[s],plays:s===S.jak.st.turn?plays:null};
+    if(pid==='host')continue;
+    const c=S.conns[pid];if(c&&c.open)c.send(msg);
+  }
+  S.jak.myHand=st_hands_host();
+}
+function st_hands_host(){return S.jak.st.hands[jakSeatOf('host')];}
+function bcastJak(note){
+  S.jak.note=note||'';
+  bcast({t:'jak-state',pub:jakPub(S.jak.st),note:S.jak.note,seats:S.jak.seats});
+  jakSendHands();
+  if(S.isHost)S.jak.myPlaysFromHost=null;
+}
+
+function jakAutoGone(){
+  if(!S.isHost||!S.jak||S.jak.st.winner>=0)return;
+  let guard=0;
+  while(guard++<40){
+    const pid=S.jak.seats[S.jak.st.turn];
+    const present=pid==='host'||(S.conns[pid]&&S.conns[pid].open);
+    if(present)break;
+    const seat=S.jak.st.turn;
+    const plays=JAK.legalPlays(S.jak.st,seat);
+    const nm=(S.players.find(p=>p.id===pid)||{}).name||'Player';
+    if(plays.length===0){
+      const card=S.jak.st.hands[seat][0];
+      const r=JAK.burn(S.jak.st,seat,card);
+      if(!r.ok)break;
+      if(r.events.some(e=>e.t==='redeal'))JAK.deal(S.jak.st);
+      bcastJak(nm+' ka connection gaya - auto burn. Ab agli turn.');
+    }else{
+      const r=JAK.play(S.jak.st,seat,plays[0]);
+      if(!r.ok)break;
+      if(r.events.some(e=>e.t==='redeal'))JAK.deal(S.jak.st);
+      bcastJak(nm+' ka connection gaya - auto move. Ab agli turn.');
+    }
+    if(S.jak.st.winner>=0)break;
+  }
+  uiJak(S.jak.note);
+}
+function startJakGame(){
+  if(S.players.length!==4)return;
+  S.jak={st:JAK.newGame(),seats:S.players.slice(0,4).map(p=>p.id),sel:{},note:'Jackaroo shuru! Teams: 1+3 vs 2+4.'};
+  bcastJak(S.jak.note);uiJak(S.jak.note);
+}
+function jakNoteFromEvents(seat,ev){
+  const nm=s=>{const pid=S.jak.seats[s];const p=S.players.find(x=>x.id===pid);return p?p.name:'?';};
+  let note='';
+  for(const e of ev){
+    if(e.t==='out')note+=nm(e.seat)+' ki goti bahar. ';
+    if(e.t==='capture')note+=nm(seat)+' ne '+nm(e.seat)+' ki goti kaati! ';
+    if(e.t==='swap')note+=nm(seat)+' ne swap kiya. ';
+    if(e.t==='burn')note+=nm(e.seat)+' ne card burn kiya. ';
+    if(e.t==='redeal')note+='Naye cards bante gaye. ';
+    if(e.t==='win')note+='Team '+JAK_TEAMNAME[e.team]+' JEET GAYI! 🎉 ';
+  }
+  if(S.jak.st.winner<0)note+='Ab '+nm(S.jak.st.turn)+' ki turn.';
+  return note;
+}
+function hostJakPlay(seat,play){
+  const r=JAK.play(S.jak.st,seat,play);
+  if(!r.ok)return;
+  if(r.events.some(e=>e.t==='redeal'))JAK.deal(S.jak.st);
+  const note=jakNoteFromEvents(seat,r.events);
+  bcastJak(note);uiJak(note);
+}
+function hostJakBurn(seat,card){
+  const r=JAK.burn(S.jak.st,seat,card);
+  if(!r.ok)return;
+  if(r.events.some(e=>e.t==='redeal'))JAK.deal(S.jak.st);
+  const note=jakNoteFromEvents(seat,r.events);
+  bcastJak(note);uiJak(note);
 }
 
 </script>
