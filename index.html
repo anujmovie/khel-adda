@@ -57,6 +57,11 @@ label{font-size:13px;font-weight:600;color:var(--muted)}
 <body>
 <div class="app">
 <header><h1>Khel <span>Adda</span> Online</h1><div class="tag">Doston ke saath, alag-alag phones par. Free, bina signup.</div></header>
+<div id="voicebar" class="card hidden" style="flex-direction:row;align-items:center;gap:10px;padding:10px 14px">
+  <button class="btn ghost" id="voicebtn" style="width:auto;padding:9px 16px;font-size:14px">Mic: OFF</button>
+  <div class="note" id="voicenote" style="text-align:left;flex:1">Voice chat (beta). Sabko ON karna hoga.</div>
+  <div id="voiceaudios"></div>
+</div>
 <div id="screen"></div>
 <div class="note" id="foot">Rooms chhote honge toh sabse smooth chalega (3-8 players). Net chahiye.</div>
 </div>
@@ -124,7 +129,7 @@ function hostRoom(name){
   S.code=mkCode();S.isHost=true;S.me.id='host';
   S.players=[{id:'host',name}];
   S.peer=new Peer(peerId(S.code),ICE);
-  S.peer.on('open',()=>uiLobby());
+  S.peer.on('open',()=>{wireIncomingCalls();uiLobby();});
   S.peer.on('error',e=>{console.warn(e);setStatus('Room nahi ban paya. Dobara try karo.',1);});
   S.peer.on('connection',conn=>{
     conn.on('data',msg=>{
@@ -133,7 +138,7 @@ function hostRoom(name){
         S.conns[conn.peer]=conn;
         S.players.push({id:conn.peer,name:conn._pname});
         send(conn,{t:'welcome',id:conn.peer,code:S.code});
-        bcastLobby();uiLobby();
+        bcastLobby();uiLobby();reconcileCalls();
       } else if(msg.t==='chat'){bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
       else if(msg.t==='vote'){onVote(conn.peer,msg.vote);}
       else if(msg.t==='spyguess'){onSpyGuess(String(msg.word||''));}
@@ -159,7 +164,7 @@ function joinRoom(name,code){
   S.peer.on('open',()=>{
     const conn=S.peer.connect(peerId(code),{reliable:true});
     S.conn=conn;
-    conn.on('open',()=>{conn.send({t:'join',name});uiJoinWait();});
+    conn.on('open',()=>{wireIncomingCalls();conn.send({t:'join',name});uiJoinWait();});
     conn.on('data',onGuestMsg);
     conn.on('close',()=>{uiHome();alert('Host ne room band kar diya ya net cut gaya.');});
     setTimeout(()=>{if(S.phase==='home')setStatus('Room mila nahi. Code check karke dobara try karo.',1);},8000);
@@ -167,7 +172,7 @@ function joinRoom(name,code){
 }
 function onGuestMsg(m){
   if(m.t==='welcome'){S.me.id=m.id;}
-  else if(m.t==='lobby'){S.players=m.players;if(S.phase==='joinwait'||S.phase==='lobby')uiLobby();}
+  else if(m.t==='lobby'){S.players=m.players;if(S.phase==='joinwait'||S.phase==='lobby')uiLobby();reconcileCalls();}
   else if(m.t==='start'){S.pack=m.pack;S.minutes=m.minutes;}
   else if(m.t==='role'){S.word=m.word;S.phase='role';uiRole();}
   else if(m.t==='discuss'){S.endAt=m.endAt;S.phase='discuss';uiDiscuss();}
@@ -185,7 +190,7 @@ setTimeout(()=>{if(S.phase==='joinwait'){const st=$('#status');if(st)st.textCont
 
 /* ---------- LOBBY ---------- */
 function uiLobby(){
-  S.phase='lobby';
+  S.phase='lobby';showVoiceBar();
   render(el=>{el.innerHTML=`
 <div class="card" style="text-align:center">
   <h2>Room code</h2>
@@ -243,7 +248,7 @@ function uiRole(){render(el=>{
 });}
 
 /* ---------- DISCUSSION ---------- */
-function uiDiscuss(){render(el=>{el.innerHTML=`
+function uiDiscuss(){showVoiceBar();render(el=>{el.innerHTML=`
 <div class="card">
   <h2 style="text-align:center">Discussion chal rahi hai</h2>
   <div class="timer" id="t">--:--</div>
@@ -315,7 +320,7 @@ function endRound(spyEscaped,guess){
 }
 
 /* ---------- VOTE UI ---------- */
-function uiVote(){render(el=>{el.innerHTML=`
+function uiVote(){showVoiceBar();render(el=>{el.innerHTML=`
 <div class="card">
   <h2 style="text-align:center">Kaun hai Spy?</h2>
   <div class="timer" id="t">--:--</div>
@@ -364,6 +369,64 @@ ${S.isHost?'<button class="btn" id="again">Naya round (naya word, naya spy)</but
 $('#again')?.addEventListener('click',()=>{startGame();});
 $('#leave').addEventListener('click',()=>{try{S.peer&&S.peer.destroy();}catch(e){}location.reload();});
 });}
+
+/* ---------- VOICE (WebRTC audio mesh) ---------- */
+S.voiceOn=false;S.localStream=null;S.calls={};S.voicePeers={};
+function syncVoiceUI(){
+  const b=$('#voicebtn');if(!b)return;
+  const n=Object.keys(S.voicePeers).length;
+  b.textContent='Mic: '+(S.voiceOn?'ON':'OFF');
+  b.className='btn '+(S.voiceOn?'':'ghost');
+  b.style.width='auto';b.style.padding='9px 16px';b.style.fontSize='14px';
+  $('#voicenote').textContent=S.voiceOn?(n>0?n+' voice juda/jude hain':'Mic on hai, doosre players ka intezaar...'):'Voice chat (beta). Sabko ON karna hoga.';
+}
+function showVoiceBar(){$('#voicebar').classList.remove('hidden');const b=$('#voicebtn');if(!b._wired){b._wired=true;b.addEventListener('click',toggleVoice);}syncVoiceUI();}
+async function toggleVoice(){
+  if(S.voiceOn){S.voiceOn=false;
+    Object.values(S.calls).forEach(c=>{try{c.close();}catch(e){}});
+    S.calls={};S.voicePeers={};$('#voiceaudios').innerHTML='';
+    if(S.localStream){S.localStream.getTracks().forEach(t=>t.stop());S.localStream=null;}
+    syncVoiceUI();return;}
+  try{
+    S.localStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+  }catch(e){$('#voicenote').textContent='Mic permission nahi mili. Browser settings mein allow karo.';return;}
+  S.voiceOn=true;syncVoiceUI();reconcileCalls();
+}
+function reconcileCalls(){
+  if(!S.voiceOn||!S.localStream||!S.peer)return;
+  const myId=S.isHost?peerId(S.code):S.peer.id;
+  S.players.forEach(p=>{
+    const theirId=p.id==='host'?peerId(S.code):p.id;
+    if(theirId===myId)return;
+    if(S.calls[theirId])return;
+    if(myId<theirId){startCall(theirId);}
+  });
+}
+function startCall(theirId){
+  try{
+    const call=S.peer.call(theirId,S.localStream);
+    wireCall(call,theirId);
+  }catch(e){console.warn('call fail',e);}
+}
+function wireCall(call,theirId){
+  if(!call)return;
+  S.calls[theirId]=call;
+  call.on('stream',remote=>{
+    S.voicePeers[theirId]=true;syncVoiceUI();
+    let a=document.getElementById('aud-'+theirId);
+    if(!a){a=document.createElement('audio');a.id='aud-'+theirId;a.autoplay=true;a.playsInline=true;$('#voiceaudios').appendChild(a);}
+    a.srcObject=remote;a.play().catch(()=>{});
+  });
+  call.on('close',()=>{delete S.calls[theirId];delete S.voicePeers[theirId];const a=document.getElementById('aud-'+theirId);if(a)a.remove();syncVoiceUI();});
+  call.on('error',()=>{delete S.calls[theirId];delete S.voicePeers[theirId];syncVoiceUI();});
+}
+function wireIncomingCalls(){
+  S.peer.on('call',call=>{
+    if(!S.voiceOn||!S.localStream){try{call.close();}catch(e){}return;}
+    call.answer(S.localStream);
+    wireCall(call,call.peer);
+  });
+}
 
 uiHome();
 </script>
