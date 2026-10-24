@@ -87,11 +87,12 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function mkCode(){const c='ABCDEFGHJKMNPQRSTUVWXYZ23456789';let s='';for(let i=0;i<4;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
 function peerId(code){return 'khel-adda-room-'+code;}
 const ICE={config:{iceServers:[
-  {urls:'stun:stun.relay.metered.ca:80'},
+  {urls:['stun:stun.relay.metered.ca:80','stun:stun.l.google.com:19302']},
   {urls:'turn:standard.relay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
   {urls:'turn:standard.relay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
-  {urls:'turns:standard.relay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'}
-]}};
+  {urls:'turn:standard.relay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turns:standard.relay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'}
+]},iceTransportPolicy:'all'};
 
 function setStatus(msg,err){const el=$('#status');if(el){el.textContent=msg||'';el.className='status'+(err?' err':'');}}
 function render(fn){if(S.timerInt){clearInterval(S.timerInt);S.timerInt=null;}screen.innerHTML='';fn(screen);window.scrollTo(0,0);}
