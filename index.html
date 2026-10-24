@@ -168,11 +168,14 @@ function handleGuestData(conn,msg){
   else if(msg.t==='spyguess'){onSpyGuess(String(msg.word||''));}
   else if(msg.t==='guess'){if(!onDrawGuess(conn.peer,String(msg.text||'')))bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
   else if(msg.t==='drawdone'){if(conn.peer===S.draw.drawer)endDrawRound('done');}
+  else if(msg.t==='ludo-roll'){if(S.ludo&&S.ludo.st.winner<0&&S.ludo.st.turn===ludoSeatOf(conn.peer))hostLudoRoll();}
+  else if(msg.t==='ludo-move'){if(S.ludo&&S.ludo.st.winner<0&&S.ludo.st.turn===ludoSeatOf(conn.peer))hostLudoMove(S.ludo.st.turn,msg.token|0);}
   else if(msg.t==='stroke'||msg.t==='clearcanvas'){if(conn.peer===S.draw.drawer){bcastRaw(msg);}}
 }
 function onConnClosed(conn){
   const i=S.players.findIndex(p=>p.id===conn.peer);
   const nm=i>=0?S.players[i].name:'';
+  if(S.ludo&&S.ludo.st.winner<0){setTimeout(()=>{ludoSkipGone();bcastLudo((nm||'Player')+' ka connection gaya; uski turn skip hogi.');uiLudo();},300);}
   delete S.conns[conn.peer];
   if(S.calls[conn.peer]){delete S.calls[conn.peer];delete S.voicePeers[conn.peer];syncVoiceUI();}
   if(i>0){S.players.splice(i,1);bcast({t:'sys',text:nm+' chala gaya'});bcastLobby();if(S.phase==='lobby')uiLobby();}
@@ -253,6 +256,7 @@ function onGuestMsg(m){
   else if(m.t==='sys'){addSys(m.text);}
   else if(m.t==='result'){uiResult(m);}
   else if(m.t==='spyguesstime'){uiSpyGuessWait(m.spyName);}
+  else if(m.t==='ludo-state'){S.ludo={st:m.st,seats:m.seats,lastDice:m.lastDice};S.phase='ludo';uiLudo(m.note);}
 }
 
 /* ---------- JOIN WAIT ---------- */
@@ -288,6 +292,7 @@ ${S.isHost?`
   <div class="gametabs">
     <button class="btn" id="tab-spy">Kaun Spy Hai</button>
     <button class="btn ghost" id="tab-draw">Banao aur Guess Karo</button>
+    <button class="btn ghost" id="tab-ludo">Ludo</button>
   </div>
   <div id="spysettings">
   <label>Word pack</label>
@@ -301,21 +306,27 @@ ${S.isHost?`
   <select id="minutes"><option value="2">2 min</option><option value="3" selected>3 min</option><option value="5">5 min</option></select>
   </div>
   <button class="btn" id="start" ${S.players.length<3?'disabled':''}>Game shuru karo${S.players.length<3?' (kam se kam 3 players)':''}</button>
-  <div class="note">Spy game mein 3-8 players best. Draw game 2-8 players.</div>
+  <div class="note">Spy 3-8, Draw 2-8, Ludo 2-4 players. Ludo aur baaki games sab ke phones par sync hote hain.</div>
 </div>`:`
 <div class="card"><div class="note">Host game shuru karega. Pack aur time host chunta hai.</div></div>`}`;
   if(S.isHost){window._gameSel=wireGameTabs();const b=$('#start');if(b)b.addEventListener('click',startGame);}
 });}
 function wireGameTabs(){
   let sel='spy';
-  const ts=$('#tab-spy'),td=$('#tab-draw');
-  const paint=()=>{ts.className='btn '+(sel==='spy'?'':'ghost');td.className='btn '+(sel==='draw'?'':'ghost');$('#spysettings').style.display=sel==='spy'?'':'none';};
-  ts.addEventListener('click',()=>{sel='spy';paint();});
-  td.addEventListener('click',()=>{sel='draw';paint();});
+  const tabs={spy:$('#tab-spy'),draw:$('#tab-draw'),ludo:$('#tab-ludo')};
+  const lim={spy:[3,8],draw:[2,8],ludo:[2,4]};
+  const paint=()=>{
+    for(const k in tabs)tabs[k].className='btn '+(sel===k?'':'ghost');
+    $('#spysettings').style.display=sel==='spy'?'':'none';
+    const b=$('#start');const n=S.players.length;const lims=lim[sel];
+    if(b){b.disabled=n<lims[0]||n>lims[1];b.textContent=(n<lims[0]||n>lims[1])?('Game shuru karo ('+lims[0]+'-'+lims[1]+' players)'):'Game shuru karo';}
+  };
+  for(const k in tabs)tabs[k].addEventListener('click',()=>{sel=k;paint();});
   paint();
   return ()=>sel;
 }
 function startGame(){
+  if(window._gameSel&&window._gameSel()==='ludo'){startLudoGame();return;}
   if(window._gameSel&&window._gameSel()==='draw'){startDrawGame();return;}
   S.pack=$('#pack').value;S.minutes=parseInt($('#minutes').value,10);
   const words=allWords(S.pack);
@@ -768,6 +779,248 @@ uiHome();
 </script>
 <script>
 if('serviceWorker' in navigator){window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});});}
+
+/* Khel Adda Ludo engine - classic rules, host-authoritative.
+   Token progress p: -1 yard; 0..50 track (abs=(start+p)%52); 51 last track cell;
+   52..56 home column; 57 finished. */
+var LUDO = (function(){
+  const STARTS = {0:0, 1:13, 2:26, 3:39};          // player seat -> track start
+  const SAFE = new Set([0,8,13,21,26,34,39,47]);   // absolute safe cells
+  const COLORS = ['red','green','yellow','blue'];
+
+  function newGame(nPlayers){
+    return {
+      n: nPlayers,
+      tokens: Array.from({length:nPlayers},()=>[-1,-1,-1,-1]),
+      turn: 0,
+      dice: null,          // pending dice value awaiting move
+      sixes: 0,            // consecutive sixes this turn
+      phase: 'roll',       // roll | move | done
+      winner: -1,
+      log: []
+    };
+  }
+  function absPos(seat,p){ return p<0||p>51 ? -1 : (STARTS[seat]+p)%52; }
+  function legalMoves(st, seat, dice){
+    const out=[];
+    for(let t=0;t<4;t++){
+      const p=st.tokens[seat][t];
+      if(p===57) continue;
+      if(p===-1){ if(dice===6) out.push(t); continue; }
+      const np=p+dice;
+      if(np>57) continue;               // need exact to finish
+      out.push(t);
+    }
+    return out;
+  }
+  function forcedMoveCount(st, seat, dice){ return legalMoves(st,seat,dice).length; }
+  // apply roll; returns events
+  function roll(st, seat, diceVal){
+    if(st.phase!=='roll'||seat!==st.turn||st.winner>=0) return {ok:false};
+    const ev={ok:true,dice:diceVal,events:[]};
+    st.dice=diceVal;
+    if(diceVal===6) st.sixes++; else st.sixes=0;
+    if(st.sixes===3){ ev.events.push({t:'three-sixes'}); endTurn(st); ev.turn=st.turn; return ev; }
+    if(forcedMoveCount(st,seat,diceVal)===0){ ev.events.push({t:'no-move'}); endTurn(st); ev.turn=st.turn; return ev; }
+    st.phase='move'; ev.moves=legalMoves(st,seat,diceVal); return ev;
+  }
+  function move(st, seat, tokenIdx){
+    if(st.phase!=='move'||seat!==st.turn||st.winner>=0) return {ok:false};
+    if(!legalMoves(st,seat,st.dice).includes(tokenIdx)) return {ok:false};
+    const ev={ok:true,events:[]};
+    let p=st.tokens[seat][tokenIdx];
+    let np = p===-1 ? 0 : p+st.dice;
+    st.tokens[seat][tokenIdx]=np;
+    ev.events.push({t:'move',seat,token:tokenIdx,from:p,to:np});
+    // capture
+    if(np>=0&&np<=51){
+      const a=absPos(seat,np);
+      if(!SAFE.has(a)){
+        for(let s=0;s<st.n;s++){
+          if(s===seat) continue;
+          for(let t=0;t<4;t++){
+            if(st.tokens[s][t]>=0&&st.tokens[s][t]<=51&&absPos(s,st.tokens[s][t])===a){
+              st.tokens[s][t]=-1; ev.events.push({t:'capture',seat:s,token:t});
+            }
+          }
+        }
+      }
+    }
+    if(np===57) ev.events.push({t:'finish',seat,token:tokenIdx});
+    // win check
+    if(st.tokens[seat].every(x=>x===57)){ st.winner=seat; st.phase='done'; ev.events.push({t:'win',seat}); return ev; }
+    // extra turn on 6 or capture or finish? classic party rule: extra only on 6 (and on capture/finish per common Indian rules)
+    const captured=ev.events.some(e=>e.t==='capture'), finished=ev.events.some(e=>e.t==='finish');
+    if(st.dice!==6 && !captured && !finished){ endTurn(st); }
+    else { st.phase='roll'; st.dice=null; ev.events.push({t:'extra-turn'}); }
+    ev.turn=st.turn; return ev;
+  }
+  function endTurn(st){ st.turn=(st.turn+1)%st.n; st.phase='roll'; st.dice=null; st.sixes=0; }
+  function serialize(st){ return JSON.parse(JSON.stringify(st)); }
+  return {newGame,roll,move,legalMoves,absPos,STARTS,SAFE,COLORS,serialize};
+})();
+if(typeof module!=='undefined') module.exports=LUDO;
+
+/* ---------- LUDO ---------- */
+const LUDO_RING=[[8,1],[8,2],[8,3],[8,4],[8,5],[8,6],[9,6],[10,6],[11,6],[12,6],[13,6],[14,6],[14,7],[14,8],[13,8],[12,8],[11,8],[10,8],[9,8],[8,8],[8,9],[8,10],[8,11],[8,12],[8,13],[8,14],[7,14],[6,14],[6,13],[6,12],[6,11],[6,10],[6,9],[6,8],[5,8],[4,8],[3,8],[2,8],[1,8],[0,8],[0,7],[0,6],[1,6],[2,6],[3,6],[4,6],[5,6],[6,6],[6,5],[6,4],[6,3],[6,2],[6,1],[6,0],[7,0],[8,0]];
+const LUDO_HOMECOL={0:[[7,1],[7,2],[7,3],[7,4],[7,5]],1:[[13,8],[12,8],[11,8],[10,8],[9,8]],2:[[7,13],[7,12],[7,11],[7,10],[7,9]],3:[[1,6],[2,6],[3,6],[4,6],[5,6]]};
+const LUDO_YARD={0:[[10.5,1.5],[10.5,3.5],[12.5,1.5],[12.5,3.5]],1:[[10.5,10.5],[10.5,12.5],[12.5,10.5],[12.5,12.5]],2:[[1.5,10.5],[1.5,12.5],[3.5,10.5],[3.5,12.5]],3:[[1.5,1.5],[1.5,3.5],[3.5,1.5],[3.5,3.5]]};
+const LUDO_YARDRECT={0:[9,0],1:[9,9],2:[0,9],3:[0,0]};
+const LUDO_SEATCOLOR=['#c25b4e','#3f6fb5','#c9a227','#5f9c8a'];
+const LUDO_SEATLIGHT=['#f2d9d5','#d8e3f2','#f2e8c8','#dcede7'];
+const LUDO_STARS=[[10,6],[8,10],[4,8],[6,4]];
+const LUDO_STARTCELLS=[[8,1],[14,7],[7,14],[0,7]];
+
+function ludoSeatOf(pid){return S.ludo?S.ludo.seats.indexOf(pid):-1;}
+function myLudoSeat(){return ludoSeatOf(S.me.id);}
+function ludoSeatName(seat){const pid=S.ludo.seats[seat];const p=S.players.find(x=>x.id===pid);return (p?p.name:'?')+(pid===S.me.id?' (tum)':'');}
+function ludoTokenXY(seat,p){
+  if(p===-1)return LUDO_YARD[seat][0]; // caller overrides per token index
+  if(p<=51){const c=LUDO_RING[(LUDO.STARTS[seat]+p)%52];return c;}
+  if(p<=56)return LUDO_HOMECOL[seat][p-52];
+  return [7.5,7.5];
+}
+function ludoBoardSVG(){
+  const safeAbs=LUDO.SAFE;
+  let cells='';
+  for(let r=0;r<15;r++)for(let c=0;c<15;c++){
+    const inYard=(r<6&&c<6)||(r<6&&c>8)||(r>8&&c<6)||(r>8&&c>8);
+    if(inYard)continue;
+    const inCenter=(r>=6&&r<=8&&c>=6&&c<=8);
+    if(inCenter)continue;
+    cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="#fff" stroke="#e5dfd6" stroke-width="0.03"/>`;
+  }
+  // yards
+  for(let s=0;s<4;s++){
+    if(s>=S.ludo.st.n)continue;
+    const [ry,cy]=LUDO_YARDRECT[s];
+    cells+=`<rect x="${cy}" y="${ry}" width="6" height="6" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"/>
+<rect x="${cy+1}" y="${ry+1}" width="4" height="4" rx="0.5" fill="#fff"/>
+${LUDO_YARD[s].map(([r,c])=>`<circle cx="${c}" cy="${r}" r="0.55" fill="${LUDO_SEATLIGHT[s]}" stroke="${LUDO_SEATCOLOR[s]}" stroke-width="0.08"/>`).join('')}`;
+  }
+  // home columns
+  for(let s=0;s<4;s++){
+    if(s>=S.ludo.st.n)continue;
+    for(const [r,c] of LUDO_HOMECOL[s])cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"/>`;
+  }
+  // start cells
+  for(let s=0;s<4;s++){
+    if(s>=S.ludo.st.n)continue;
+    const [r,c]=LUDO_STARTCELLS[s];
+    cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"/>`;
+  }
+  // stars
+  for(const [r,c] of LUDO_STARS)cells+=`<text x="${c+0.5}" y="${r+0.72}" font-size="0.7" text-anchor="middle" fill="#c9a227">★</text>`;
+  // center triangles
+  cells+=`<polygon points="6,6 6,9 7.5,7.5" fill="${S.ludo.st.n>3?LUDO_SEATCOLOR[3]:'#eee'}"/>
+<polygon points="6,9 9,9 7.5,7.5" fill="${S.ludo.st.n>2?LUDO_SEATCOLOR[2]:'#eee'}"/>
+<polygon points="9,9 9,6 7.5,7.5" fill="${S.ludo.st.n>1?LUDO_SEATCOLOR[1]:'#eee'}"/>
+<polygon points="9,6 6,6 7.5,7.5" fill="${LUDO_SEATCOLOR[0]}"/>`;
+  return cells;
+}
+function ludoTokensSVG(){
+  const st=S.ludo.st;
+  const cellMap={};
+  const out=[];
+  for(let s=0;s<st.n;s++)for(let i=0;i<4;i++){
+    const p=st.tokens[s][i];
+    let xy;
+    if(p===-1)xy=LUDO_YARD[s][i];
+    else xy=ludoTokenXY(s,p);
+    const key=xy[0].toFixed(2)+','+xy[1].toFixed(2);
+    cellMap[key]=cellMap[key]||0;
+    const k=cellMap[key]++;
+    const off=k===0?[0,0]:[[0.16,0.16],[-0.16,-0.16],[0.16,-0.16],[-0.16,0.16]][(k-1)%4];
+    const y=xy[0]+off[0],x=xy[1]+off[1];
+    const playable = myLudoSeat()===st.turn && st.phase==='move' && LUDO.legalMoves(st,st.turn,st.dice).includes(i) && st.turn===s;
+    out.push(`<circle cx="${x}" cy="${y}" r="${p===57?0.22:0.32}" fill="${LUDO_SEATCOLOR[s]}" stroke="${playable?'#2b2620':'#fff'}" stroke-width="${playable?0.12:0.06}" data-lseat="${s}" data-ltok="${i}" class="ltok${playable?' playable':''}" style="cursor:${playable?'pointer':'default'}"/>`);
+  }
+  return out.join('');
+}
+function uiLudo(note){
+  S.phase='ludo';showVoiceBar();
+  const st=S.ludo.st;
+  const mySeat=myLudoSeat();
+  const isMyTurn=st.turn===mySeat&&st.winner<0;
+  const turnName=st.winner>=0?'':ludoSeatName(st.turn);
+  const diceFace=['','⚀','⚁','⚂','⚃','⚄','⚅'][S.ludo.lastDice?S.ludo.lastDice.d:0]||'🎲';
+  let status;
+  if(st.winner>=0)status=`<b>${esc(ludoSeatName(st.winner))}</b> jeet gaya! 🎉`;
+  else if(isMyTurn&&st.phase==='roll')status='Tumhari turn - dice dabao';
+  else if(isMyTurn&&st.phase==='move')status='Dice: <b>'+st.dice+'</b> - apna token chuno';
+  else status=esc(turnName)+' ki turn';
+  render(el=>{el.innerHTML=`
+<div class="card">
+  <h2>Ludo</h2>
+  <div class="note">${status}</div>
+  <svg viewBox="0 0 15 15" style="width:100%;max-width:430px;display:block;margin:0 auto;border-radius:10px;touch-action:manipulation">${ludoBoardSVG()}${ludoTokensSVG()}</svg>
+  <div class="row" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px">
+    <button class="btn" id="ludo-dice" style="width:auto;padding:12px 26px;font-size:22px" ${isMyTurn&&st.phase==='roll'?'':'disabled'}>${diceFace} Dice</button>
+  </div>
+  ${note?`<div class="note" style="text-align:center;margin-top:8px">${esc(note)}</div>`:''}
+  ${st.winner>=0&&S.isHost?'<button class="btn" id="ludo-again" style="margin-top:10px">Phir se khelo</button>':''}
+  <div class="note" style="margin-top:8px">${S.ludo.seats.map((pid,i)=>{const p=S.players.find(x=>x.id===pid);return `<span style="color:${LUDO_SEATCOLOR[i]}">●</span> ${esc(p?p.name:'?')}`;}).join(' · ')}</div>
+</div>`;
+    const db=$('#ludo-dice');
+    if(db)db.addEventListener('click',ludoDoRoll);
+    el.querySelectorAll('.ltok.playable').forEach(t=>t.addEventListener('click',()=>{ludoDoMove(parseInt(t.dataset.ltok,10));}));
+    const ag=$('#ludo-again');if(ag)ag.addEventListener('click',()=>{startLudoGame();});
+  });
+}
+function ludoDoRoll(){
+  const st=S.ludo.st;if(st.phase!=='roll'||st.turn!==myLudoSeat())return;
+  if(S.isHost)hostLudoRoll();
+  else if(S.conn&&S.conn.open)S.conn.send({t:'ludo-roll'});
+}
+function ludoDoMove(tok){
+  const st=S.ludo.st;if(st.phase!=='move'||st.turn!==myLudoSeat())return;
+  if(S.isHost)hostLudoMove(st.turn,tok);
+  else if(S.conn&&S.conn.open)S.conn.send({t:'ludo-move',token:tok});
+}
+function startLudoGame(){
+  const n=S.players.length;if(n<2||n>4)return;
+  S.ludo={st:LUDO.newGame(n),seats:S.players.slice(0,n).map(p=>p.id),lastDice:null};
+  bcastLudo('Ludo shuru! 6 aane par token bahar niklega.');
+  uiLudo('Ludo shuru! 6 aane par token bahar niklega.');
+}
+function bcastLudo(note){bcast({t:'ludo-state',st:LUDO.serialize(S.ludo.st),seats:S.ludo.seats,note:note||'',lastDice:S.ludo.lastDice});}
+function hostLudoRoll(){
+  const st=S.ludo.st;const seat=st.turn;
+  const d=1+Math.floor(Math.random()*6);
+  const r=LUDO.roll(st,seat,d);
+  if(!r.ok)return;
+  S.ludo.lastDice={seat:seat,d:d};
+  let note=ludoSeatName(seat)+' ne dice phenka: '+d;
+  if(r.events.some(e=>e.t==='three-sixes'))note+=' - teen baar 6! Turn cancel.';
+  else if(r.events.some(e=>e.t==='no-move'))note+=' - koi move nahi, turn aage.';
+  ludoSkipGone();
+  bcastLudo(note);uiLudo(note);
+}
+function hostLudoMove(seat,tok){
+  const r=LUDO.move(S.ludo.st,seat,tok);
+  if(!r.ok)return;
+  let note='';
+  for(const e of r.events){
+    if(e.t==='capture')note+=ludoSeatName(seat)+' ne '+ludoSeatName(e.seat)+' ka token kaata! ';
+    if(e.t==='finish')note+=ludoSeatName(seat)+' ka token ghar pahuncha! ';
+    if(e.t==='extra-turn')note+='Extra turn! ';
+    if(e.t==='win')note+=ludoSeatName(e.seat)+' JEET GAYA! 🎉 ';
+  }
+  if(S.ludo.st.winner<0)ludoSkipGone();
+  bcastLudo(note);uiLudo(note);
+}
+function ludoSkipGone(){
+  const st=S.ludo&&S.ludo.st;if(!st||st.winner>=0)return;
+  let guard=0;let skipped=[];
+  while(guard++<5){
+    const pid=S.ludo.seats[st.turn];
+    const present=pid==='host'||(S.conns[pid]&&S.conns[pid].open);
+    if(present)break;
+    skipped.push(ludoSeatName(st.turn));
+    st.turn=(st.turn+1)%st.n;st.phase='roll';st.dice=null;st.sixes=0;
+  }
+}
+
 </script>
 </body>
 </html>
