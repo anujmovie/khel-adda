@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Khel Adda Online</title>
+<meta name="theme-color" content="#5f9c8a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Khel Adda">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
 :root{--green:#5f9c8a;--ink:#2b2620;--muted:#7a7268;--bg:#f6f3ee;--card:#ffffff;--line:#e5dfd6;--red:#c25b4e;--gold:#c9a227}
@@ -135,36 +142,89 @@ $('#joincode').addEventListener('keydown',e=>{if(e.key==='Enter')$('#join').clic
 function hostRoom(name){
   S.code=mkCode();S.isHost=true;S.me.id='host';
   S.players=[{id:'host',name}];
-  S.peer=new Peer(peerId(S.code),ICE);
+  wireAsHost();
   S.peer.on('open',()=>{wireIncomingCalls();uiLobby();});
   S.peer.on('error',e=>{console.warn(e);setStatus('Room nahi ban paya. Dobara try karo.',1);});
-  S.peer.on('connection',conn=>{
-    conn.on('data',msg=>{
-      if(msg.t==='join'){
-        conn._pname=String(msg.name||'Player').slice(0,16);
-        S.conns[conn.peer]=conn;
-        S.players.push({id:conn.peer,name:conn._pname});
-        send(conn,{t:'welcome',id:conn.peer,code:S.code});
-        bcastLobby();uiLobby();reconcileCalls();
-      } else if(msg.t==='chat'){bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
-      else if(msg.t==='vote'){onVote(conn.peer,msg.vote);}
-      else if(msg.t==='spyguess'){onSpyGuess(String(msg.word||''));}
-      else if(msg.t==='guess'){if(!onDrawGuess(conn.peer,String(msg.text||'')))bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
-      else if(msg.t==='drawdone'){if(conn.peer===S.draw.drawer)endDrawRound('done');}
-      else if(msg.t==='stroke'||msg.t==='clearcanvas'){if(conn.peer===S.draw.drawer){bcastRaw(msg);}}
-    });
-    conn.on('close',()=>{
-      const i=S.players.findIndex(p=>p.id===conn.peer);
-      const nm=i>=0?S.players[i].name:'';
-      delete S.conns[conn.peer];
-      if(i>0){S.players.splice(i,1);bcast({t:'sys',text:nm+' chala gaya'});bcastLobby();if(S.phase==='lobby')uiLobby();}
-    });
+}
+function wireAsHost(){
+  S.isHost=true;S.me.id='host';
+  if(!S.peer||S.peer.destroyed)S.peer=new Peer(peerId(S.code),ICE);
+  startHeartbeat();
+  if(!S.peer._hostWired){S.peer._hostWired=true;S.peer.on('connection',attachHostConn);}
+}
+function attachHostConn(conn){
+  conn._lastHeard=Date.now();
+  conn.on('data',msg=>{
+    conn._lastHeard=Date.now();
+    if(msg.t==='join'){conn._pname=String(msg.name||'Player').slice(0,16);handleJoin(conn,!!msg.rejoin);}
+    else handleGuestData(conn,msg);
   });
+  conn.on('close',()=>onConnClosed(conn));
+}
+function handleGuestData(conn,msg){
+  if(msg.t==='pong'){return;}
+  if(msg.t==='chat'){bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
+  else if(msg.t==='vote'){onVote(conn.peer,msg.vote);}
+  else if(msg.t==='spyguess'){onSpyGuess(String(msg.word||''));}
+  else if(msg.t==='guess'){if(!onDrawGuess(conn.peer,String(msg.text||'')))bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
+  else if(msg.t==='drawdone'){if(conn.peer===S.draw.drawer)endDrawRound('done');}
+  else if(msg.t==='stroke'||msg.t==='clearcanvas'){if(conn.peer===S.draw.drawer){bcastRaw(msg);}}
+}
+function onConnClosed(conn){
+  const i=S.players.findIndex(p=>p.id===conn.peer);
+  const nm=i>=0?S.players[i].name:'';
+  delete S.conns[conn.peer];
+  if(S.calls[conn.peer]){delete S.calls[conn.peer];delete S.voicePeers[conn.peer];syncVoiceUI();}
+  if(i>0){S.players.splice(i,1);bcast({t:'sys',text:nm+' chala gaya'});bcastLobby();if(S.phase==='lobby')uiLobby();}
 }
 function pname(id){const p=S.players.find(p=>p.id===id);return p?p.name:'Player';}
 function send(conn,msg){try{conn.send(msg);}catch(e){}}
 function bcast(msg){Object.values(S.conns).forEach(c=>send(c,msg));if(msg.t==='chat')addChat(msg.name,msg.text);if(msg.t==='sys')addSys(msg.text);}
 function bcastLobby(){bcast({t:'lobby',players:S.players.map(p=>({id:p.id,name:p.name}))});}
+
+function handleJoin(conn,rejoin){
+  const nm=conn._pname;
+  const existing=S.players.findIndex(p=>p.id!=='host'&&p.name.toLowerCase()===nm.toLowerCase());
+  const oldId=existing>=0?S.players[existing].id:null;
+  if(rejoin&&existing>=0&&oldId!==conn.peer){
+    if(S.conns[oldId]){try{S.conns[oldId].close();}catch(e){}delete S.conns[oldId];}
+    S.players[existing].id=conn.peer;
+    if(S.draw&&S.draw.scores&&S.draw.scores[oldId]!==undefined){S.draw.scores[conn.peer]=S.draw.scores[oldId];delete S.draw.scores[oldId];}
+    if(S.draw&&S.draw.order){S.draw.order=S.draw.order.map(id=>id===oldId?conn.peer:id);}
+    if(S.draw&&S.draw.drawer===oldId)S.draw.drawer=conn.peer;
+    if(S.spyRoles&&S.spyRoles[oldId]!==undefined){S.spyRoles[conn.peer]=S.spyRoles[oldId];delete S.spyRoles[oldId];}
+    bcast({t:'sys',text:nm+' wapas aa gaya'});
+  } else if(existing<0){
+    S.players.push({id:conn.peer,name:nm});
+  }
+  S.conns[conn.peer]=conn;
+  send(conn,{t:'welcome',id:conn.peer,code:S.code});
+  sendSnapshot(conn);
+  bcastLobby();uiLobby();reconcileCalls();
+}
+function sendSnapshot(conn){
+  const snap={t:'snapshot',phase:S.phase,players:S.players.map(p=>({id:p.id,name:p.name})),endAt:S.endAt||0};
+  if(S.draw&&S.draw.scores&&Object.keys(S.draw.scores).length)snap.scores=S.draw.scores;
+  if(S.phase==='draw'){
+    snap.draw={displayRound:S.draw.displayRound,total:S.draw.total,drawer:S.draw.drawer,drawerName:pname(S.draw.drawer)};
+    if(S.draw.drawer===conn.peer)snap.drawword=S.draw.word;
+  }
+  if((S.phase==='discuss'||S.phase==='vote')&&S.spyRoles&&S.spyRoles[conn.peer]!==undefined){
+    snap.spyword=S.spyRoles[conn.peer];
+  }
+  send(conn,snap);
+}
+function startHeartbeat(){
+  if(S.hbInt)clearInterval(S.hbInt);
+  S.hbInt=setInterval(()=>{
+    if(!S.isHost){clearInterval(S.hbInt);return;}
+    bcastRaw({t:'ping'});
+    const now=Date.now();
+    Object.entries(S.conns).forEach(([id,c])=>{
+      if(c._lastHeard&&now-c._lastHeard>14000){try{c.close();}catch(e){}}
+    });
+  },5000);
+}
 
 /* ---------- GUEST ---------- */
 function joinRoom(name,code){
@@ -176,12 +236,14 @@ function joinRoom(name,code){
     S.conn=conn;
     conn.on('open',()=>{wireIncomingCalls();conn.send({t:'join',name});uiJoinWait();});
     conn.on('data',onGuestMsg);
-    conn.on('close',()=>{uiHome();alert('Host ne room band kar diya ya net cut gaya.');});
+    conn.on('close',()=>{onHostLost();});
     setTimeout(()=>{if(S.phase==='home')setStatus('Room mila nahi. Code check karke dobara try karo.',1);},8000);
   });
 }
 function onGuestMsg(m){
-  if(m.t==='welcome'){S.me.id=m.id;}
+  if(m.t==='ping'){S.lastPing=Date.now();if(S.conn&&S.conn.open)S.conn.send({t:'pong'});return;}
+  if(m.t==='welcome'){S.me.id=m.id;S.lastPing=Date.now();startPingWatch();if(S.phase==='migrating'||S.phase==='joinwait')uiLobby();return;}
+  if(m.t==='snapshot'){applySnapshot(m);return;}
   else if(m.t==='lobby'){S.players=m.players;if(S.phase==='joinwait'||S.phase==='lobby')uiLobby();reconcileCalls();}
   else if(m.t==='start'){S.pack=m.pack;S.minutes=m.minutes;}
   else if(m.t==='role'){S.word=m.word;S.phase='role';uiRole();}
@@ -198,6 +260,15 @@ function uiJoinWait(){S.phase='joinwait';render(el=>{el.innerHTML=`
 <div class="card" style="text-align:center"><div class="big-emoji">${ICONS.wait}</div><h2>Room mein ja rahe ho...</h2><div class="note">Host ka room milte hi lobby khulegi.</div><div class="status err" id="status"></div></div>`;});
 setTimeout(()=>{if(S.phase==='joinwait'){const st=$('#status');if(st)st.textContent='Connect nahi ho raha. Net check karo aur dobara try karo.';}},15000);}
 
+function applySnapshot(m){
+  S.players=m.players;S.endAt=m.endAt||0;
+  if(m.scores)S.draw.scores=m.scores;
+  if(m.phase==='lobby'||S.phase==='joinwait'||S.phase==='home'||S.phase==='lobby'){uiLobby();return;}
+  if(m.phase==='discuss'){S.word=m.spyword||'';uiDiscuss();}
+  else if(m.phase==='vote'){S.word=m.spyword||'';uiVote();}
+  else if(m.phase==='draw'&&m.draw){S.draw.drawer=m.draw.drawer;S.draw.displayRound=m.draw.displayRound;S.draw.total=m.draw.total;S.draw.myword=m.drawword||'';uiDraw(m.draw.drawer===S.me.id);}
+  else{uiLobby();}
+}
 /* ---------- LOBBY ---------- */
 function uiLobby(){
   S.phase='lobby';showVoiceBar();
@@ -250,6 +321,7 @@ function startGame(){
   const words=allWords(S.pack);
   const word=words[Math.floor(Math.random()*words.length)];
   const spyIdx=Math.floor(Math.random()*S.players.length);
+  S.spyRoles={};S.players.forEach((p,i)=>{S.spyRoles[p.id]=i===spyIdx?'':word;});
   S.players.forEach((p,i)=>{
     const roleMsg={t:'role',word:i===spyIdx?'':word,spy:i===spyIdx};
     if(p.id==='host'){S.word=i===spyIdx?'':word;S.me.spy=i===spyIdx;}
@@ -395,6 +467,71 @@ ${S.isHost?'<button class="btn" id="again">Naya round (naya word, naya spy)</but
 $('#again')?.addEventListener('click',()=>{startGame();});
 $('#leave').addEventListener('click',()=>{try{S.peer&&S.peer.destroy();}catch(e){}location.reload();});
 });}
+
+function startPingWatch(){
+  if(S.pingInt)clearInterval(S.pingInt);
+  S.pingInt=setInterval(()=>{
+    if(S.isHost){clearInterval(S.pingInt);S.pingInt=null;return;}
+    if(S.lastPing&&Date.now()-S.lastPing>12000&&S.phase!=='migrating'){try{S.conn&&S.conn.close();}catch(e){}onHostLost();}
+  },4000);
+}
+function onHostLost(){
+  if(S.phase==='migrating')return;
+  S.phase='migrating';
+  Object.values(S.calls).forEach(c=>{try{c.close();}catch(e){}});
+  S.calls={};S.voicePeers={};syncVoiceUI();
+  render(el=>{el.innerHTML=`
+<div class="card" style="text-align:center"><div class="big-emoji">${ICONS.wait}</div><h2>Host se connection toota</h2><div class="note" id="mignote">Dobara judne ki koshish ho rahi hai...</div></div>`;});
+  const myOldId=S.me.id;
+  const others=S.players.filter(p=>p.id!=='host');
+  const iAmSuccessor=others.length>0&&others[0].id===myOldId;
+  if(iAmSuccessor){setTimeout(becomeHost,2500);}
+  else{setTimeout(()=>reconnectToHost(0),3500);}
+}
+function reconnectToHost(attempt){
+  if(S.isHost)return;
+  if(attempt>12){const n=$('#mignote');if(n)n.textContent='Jud nahi paaya. Room shayad band ho gaya. Dobara code se join karo.';return;}
+  if(!S.peer||S.peer.destroyed){S.peer=new Peer(ICE);S.peer.on('open',()=>reconnectToHost(attempt));return;}
+  if(!S.peer.open){S.peer.once('open',()=>reconnectToHost(attempt));return;}
+  const conn=S.peer.connect(peerId(S.code),{reliable:true});
+  S.conn=conn;
+  let opened=false;
+  conn.on('open',()=>{
+    opened=true;
+    wireIncomingCalls();
+    conn.on('data',onGuestMsg);
+    conn.on('close',()=>{onHostLost();});
+    conn.send({t:'join',name:S.me.name,rejoin:true});
+    setTimeout(()=>{if(S.phase==='migrating'&&S.conn===conn){try{conn.close();}catch(e){}reconnectToHost(attempt+1);}},6000);
+  });
+  conn.on('close',()=>{if(!opened)setTimeout(()=>reconnectToHost(attempt+1),2500);});
+  setTimeout(()=>{if(!opened&&S.phase==='migrating'&&S.conn===conn){try{conn.close();}catch(e){}reconnectToHost(attempt+1);}},4000);
+}
+function becomeHost(){
+  const oldId=S.me.id;
+  S.players=S.players.filter(p=>p.id!=='host');
+  const me=S.players.find(p=>p.id===oldId);if(me)me.id='host';
+  S.players.unshift(S.players.splice(S.players.findIndex(p=>p.id==='host'),1)[0]);
+  if(S.draw&&S.draw.scores&&S.draw.scores[oldId]!==undefined){S.draw.scores['host']=S.draw.scores[oldId];delete S.draw.scores[oldId];}
+  if(S.draw&&S.draw.order)S.draw.order=S.draw.order.map(id=>id===oldId?'host':id);
+  S.conns={};
+  try{S.peer.destroy();}catch(e){}
+  S.peer=new Peer(peerId(S.code),ICE);
+  let tries=0;
+  S.peer.on('error',e=>{
+    if(e&&e.type==='unavailable-id'&&tries<8){tries++;setTimeout(()=>{try{S.peer.destroy();}catch(_){};S.peer=new Peer(peerId(S.code),ICE);wireAsHostPeer(S.peer);},2500);}
+  });
+  wireAsHostPeer(S.peer);
+}
+function wireAsHostPeer(peer){
+  peer.on('open',()=>{
+    wireAsHost();
+    wireIncomingCalls();
+    S.phase='lobby';
+    bcast({t:'sys',text:S.me.name+' naya host hai (purana host chala gaya)'});
+    bcastLobby();uiLobby();
+  });
+}
 
 /* ---------- VOICE (WebRTC audio mesh) ---------- */
 S.voiceOn=false;S.localStream=null;S.calls={};S.voicePeers={};
@@ -628,6 +765,9 @@ ${S.isHost?'<button class="btn" id="again">Naya game (lobby wapas)</button>':''}
 }
 
 uiHome();
+</script>
+<script>
+if('serviceWorker' in navigator){window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});});}
 </script>
 </body>
 </html>
