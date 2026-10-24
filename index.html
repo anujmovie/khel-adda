@@ -306,7 +306,7 @@ ${S.isHost?`
   <select id="minutes"><option value="2">2 min</option><option value="3" selected>3 min</option><option value="5">5 min</option></select>
   </div>
   <button class="btn" id="start" ${S.players.length<3?'disabled':''}>Game shuru karo${S.players.length<3?' (kam se kam 3 players)':''}</button>
-  <div class="note">Spy 3-8, Draw 2-8, Ludo 2-4 players. Ludo aur baaki games sab ke phones par sync hote hain.</div>
+  <div class="note" id="gamenote">Kaun Spy Hai: 3-8 players. Sab ke phones par sync hota hai.</div>
 </div>`:`
 <div class="card"><div class="note">Host game shuru karega. Pack aur time host chunta hai.</div></div>`}`;
   if(S.isHost){window._gameSel=wireGameTabs();const b=$('#start');if(b)b.addEventListener('click',startGame);}
@@ -320,6 +320,8 @@ function wireGameTabs(){
     $('#spysettings').style.display=sel==='spy'?'':'none';
     const b=$('#start');const n=S.players.length;const lims=lim[sel];
     if(b){b.disabled=n<lims[0]||n>lims[1];b.textContent=(n<lims[0]||n>lims[1])?('Game shuru karo ('+lims[0]+'-'+lims[1]+' players)'):'Game shuru karo';}
+    const gn=$('#gamenote');const notes={spy:'Kaun Spy Hai: 3-8 players.',draw:'Banao aur Guess Karo: 2-8 players.',ludo:'Ludo: 2-4 players.'};
+    if(gn)gn.textContent=notes[sel]+' Sab ke phones par sync hota hai.';
   };
   for(const k in tabs)tabs[k].addEventListener('click',()=>{sel=k;paint();});
   paint();
@@ -874,6 +876,11 @@ const LUDO_STARTCELLS=[[8,1],[14,7],[7,14],[0,7]];
 function ludoSeatOf(pid){return S.ludo?S.ludo.seats.indexOf(pid):-1;}
 function myLudoSeat(){return ludoSeatOf(S.me.id);}
 function ludoSeatName(seat){const pid=S.ludo.seats[seat];const p=S.players.find(x=>x.id===pid);return (p?p.name:'?')+(pid===S.me.id?' (tum)':'');}
+function ludoDiceSVG(d){
+  const PIPS={1:[4],2:[0,8],3:[0,4,8],4:[0,2,6,8],5:[0,2,4,6,8],6:[0,2,3,5,6,8]};
+  const dots=(PIPS[d]||[]).map(i=>{const x=6+(i%3)*6,y=6+Math.floor(i/3)*6;return `<circle cx="${x}" cy="${y}" r="2.1" fill="#fff"/>`;}).join('');
+  return `<svg width="24" height="24" viewBox="0 0 24 24" style="vertical-align:-5px"><rect x="1" y="1" width="22" height="22" rx="5" fill="none" stroke="#fff" stroke-width="2"/>${dots}</svg>`;
+}
 function ludoTokenXY(seat,p){
   if(p===-1)return LUDO_YARD[seat][0]; // caller overrides per token index
   if(p<=51){const c=LUDO_RING[(LUDO.STARTS[seat]+p)%52];return c;}
@@ -888,26 +895,27 @@ function ludoBoardSVG(){
     if(inYard)continue;
     const inCenter=(r>=6&&r<=8&&c>=6&&c<=8);
     if(inCenter)continue;
-    cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="#fff" stroke="#e5dfd6" stroke-width="0.03"/>`;
+    cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="#fff" stroke="#cfc8bc" stroke-width="0.045"/>`;
   }
-  // yards
+  // yards (all four always visible, inactive dimmed like a physical board)
   for(let s=0;s<4;s++){
-    if(s>=S.ludo.st.n)continue;
+    const dim=s>=S.ludo.st.n;
+    const op=dim?' opacity="0.35"':'';
     const [ry,cy]=LUDO_YARDRECT[s];
-    cells+=`<rect x="${cy}" y="${ry}" width="6" height="6" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"/>
+    cells+=`<g${op}><rect x="${cy}" y="${ry}" width="6" height="6" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"/>
 <rect x="${cy+1}" y="${ry+1}" width="4" height="4" rx="0.5" fill="#fff"/>
-${LUDO_YARD[s].map(([r,c])=>`<circle cx="${c}" cy="${r}" r="0.55" fill="${LUDO_SEATLIGHT[s]}" stroke="${LUDO_SEATCOLOR[s]}" stroke-width="0.08"/>`).join('')}`;
+${LUDO_YARD[s].map(([r,c])=>`<circle cx="${c}" cy="${r}" r="0.55" fill="${LUDO_SEATLIGHT[s]}" stroke="${LUDO_SEATCOLOR[s]}" stroke-width="0.08"/>`).join('')}</g>`;
   }
-  // home columns
+  // home columns (all four, inactive dimmed)
   for(let s=0;s<4;s++){
-    if(s>=S.ludo.st.n)continue;
-    for(const [r,c] of LUDO_HOMECOL[s])cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"/>`;
+    const op=s>=S.ludo.st.n?' opacity="0.35"':'';
+    for(const [r,c] of LUDO_HOMECOL[s])cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"${op}/>`;
   }
-  // start cells
+  // start cells (all four, inactive dimmed)
   for(let s=0;s<4;s++){
-    if(s>=S.ludo.st.n)continue;
+    const op=s>=S.ludo.st.n?' opacity="0.35"':'';
     const [r,c]=LUDO_STARTCELLS[s];
-    cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"/>`;
+    cells+=`<rect x="${c}" y="${r}" width="1" height="1" fill="${LUDO_SEATCOLOR[s]}" stroke="#e5dfd6" stroke-width="0.03"${op}/>`;
   }
   // stars
   for(const [r,c] of LUDO_STARS)cells+=`<text x="${c+0.5}" y="${r+0.72}" font-size="0.7" text-anchor="middle" fill="#c9a227">★</text>`;
@@ -943,7 +951,7 @@ function uiLudo(note){
   const mySeat=myLudoSeat();
   const isMyTurn=st.turn===mySeat&&st.winner<0;
   const turnName=st.winner>=0?'':ludoSeatName(st.turn);
-  const diceFace=['','⚀','⚁','⚂','⚃','⚄','⚅'][S.ludo.lastDice?S.ludo.lastDice.d:0]||'🎲';
+  const diceFace=ludoDiceSVG(st.phase==='move'?st.dice:(S.ludo.lastDice?S.ludo.lastDice.d:0));
   let status;
   if(st.winner>=0)status=`<b>${esc(ludoSeatName(st.winner))}</b> jeet gaya! 🎉`;
   else if(isMyTurn&&st.phase==='roll')status='Tumhari turn - dice dabao';
@@ -994,6 +1002,7 @@ function hostLudoRoll(){
   if(r.events.some(e=>e.t==='three-sixes'))note+=' - teen baar 6! Turn cancel.';
   else if(r.events.some(e=>e.t==='no-move'))note+=' - koi move nahi, turn aage.';
   ludoSkipGone();
+  if(S.ludo.st.winner<0)note+=' Ab '+ludoSeatName(S.ludo.st.turn)+' ki turn.';
   bcastLudo(note);uiLudo(note);
 }
 function hostLudoMove(seat,tok){
@@ -1006,7 +1015,7 @@ function hostLudoMove(seat,tok){
     if(e.t==='extra-turn')note+='Extra turn! ';
     if(e.t==='win')note+=ludoSeatName(e.seat)+' JEET GAYA! 🎉 ';
   }
-  if(S.ludo.st.winner<0)ludoSkipGone();
+  if(S.ludo.st.winner<0){ludoSkipGone();note+=' Ab '+ludoSeatName(S.ludo.st.turn)+' ki turn.';}
   bcastLudo(note);uiLudo(note);
 }
 function ludoSkipGone(){
