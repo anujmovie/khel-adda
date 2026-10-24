@@ -86,6 +86,13 @@ function allWords(p){return p==='mixed'?PACKS.mixed:PACKS[p]||PACKS.mixed;}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function mkCode(){const c='ABCDEFGHJKMNPQRSTUVWXYZ23456789';let s='';for(let i=0;i<4;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
 function peerId(code){return 'khel-adda-room-'+code;}
+const ICE={config:{iceServers:[
+  {urls:'stun:stun.relay.metered.ca:80'},
+  {urls:'turn:standard.relay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turn:standard.relay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turns:standard.relay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'}
+]}};
+
 function setStatus(msg,err){const el=$('#status');if(el){el.textContent=msg||'';el.className='status'+(err?' err':'');}}
 function render(fn){if(S.timerInt){clearInterval(S.timerInt);S.timerInt=null;}screen.innerHTML='';fn(screen);window.scrollTo(0,0);}
 
@@ -115,7 +122,7 @@ $('#joincode').addEventListener('keydown',e=>{if(e.key==='Enter')$('#join').clic
 function hostRoom(name){
   S.code=mkCode();S.isHost=true;S.me.id='host';
   S.players=[{id:'host',name}];
-  S.peer=new Peer(peerId(S.code));
+  S.peer=new Peer(peerId(S.code),ICE);
   S.peer.on('open',()=>uiLobby());
   S.peer.on('error',e=>{console.warn(e);setStatus('Room nahi ban paya. Dobara try karo.',1);});
   S.peer.on('connection',conn=>{
@@ -146,7 +153,7 @@ function bcastLobby(){bcast({t:'lobby',players:S.players.map(p=>({id:p.id,name:p
 /* ---------- GUEST ---------- */
 function joinRoom(name,code){
   S.isHost=false;S.code=code;
-  S.peer=new Peer();
+  S.peer=new Peer(ICE);
   S.peer.on('error',e=>{console.warn(e);setStatus('Connect nahi hua. Code sahi hai? Room abhi khula hai?',1);});
   S.peer.on('open',()=>{
     const conn=S.peer.connect(peerId(code),{reliable:true});
@@ -172,7 +179,8 @@ function onGuestMsg(m){
 
 /* ---------- JOIN WAIT ---------- */
 function uiJoinWait(){S.phase='joinwait';render(el=>{el.innerHTML=`
-<div class="card" style="text-align:center"><div class="big-emoji">${ICONS.wait}</div><h2>Room mein ja rahe ho...</h2><div class="note">Host ka room milte hi lobby khulegi.</div></div>`;});}
+<div class="card" style="text-align:center"><div class="big-emoji">${ICONS.wait}</div><h2>Room mein ja rahe ho...</h2><div class="note">Host ka room milte hi lobby khulegi.</div><div class="status err" id="status"></div></div>`;});
+setTimeout(()=>{if(S.phase==='joinwait'){const st=$('#status');if(st)st.textContent='Connect nahi ho raha. Net check karo aur dobara try karo.';}},15000);}
 
 /* ---------- LOBBY ---------- */
 function uiLobby(){
