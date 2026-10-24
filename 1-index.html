@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Khel Adda Online</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--green:#5f9c8a;--ink:#2b2620;--muted:#7a7268;--bg:#f6f3ee;--card:#ffffff;--line:#e5dfd6;--red:#c25b4e;--gold:#c9a227}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--ink);min-height:100vh}
+.app{max-width:430px;margin:0 auto;padding:18px 16px 40px;display:flex;flex-direction:column;gap:14px}
+header{text-align:center;padding:6px 0}
+header h1{font-size:26px;letter-spacing:.5px}
+header h1 span{color:var(--green)}
+.tag{font-size:12.5px;color:var(--muted);margin-top:2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px}
+h2{font-size:18px}
+.btn{background:var(--green);color:#fff;border:0;border-radius:12px;padding:14px;font-size:16px;font-weight:600;cursor:pointer;width:100%}
+.btn:active{transform:scale(.98)}
+.btn.ghost{background:#fff;color:var(--ink);border:1.5px solid var(--line)}
+.btn.danger{background:var(--red)}
+.btn:disabled{opacity:.5}
+input,select{width:100%;padding:13px;border:1.5px solid var(--line);border-radius:12px;font-size:16px;background:#fff}
+label{font-size:13px;font-weight:600;color:var(--muted)}
+.code{display:flex;gap:8px;align-items:center;justify-content:center;background:#efe9df;border-radius:12px;padding:12px;font-size:24px;font-weight:800;letter-spacing:6px}
+.players{display:flex;flex-direction:column;gap:8px}
+.pill{display:flex;align-items:center;gap:10px;background:#f4f0e8;border-radius:10px;padding:10px 12px;font-size:15px}
+.pill .dot{width:10px;height:10px;border-radius:50%;background:var(--green);flex:none}
+.pill .host-tag{margin-left:auto;font-size:11px;color:var(--gold);font-weight:700}
+.pill .me{margin-left:auto;font-size:11px;color:var(--muted)}
+.pill .host-tag + .me{margin-left:6px}
+.word-card{text-align:center;padding:28px 16px;border-radius:14px;font-size:26px;font-weight:800}
+.word-card.spy{background:#fdeceb;color:var(--red)}
+.word-card.citizen{background:#e8f4f0;color:var(--green)}
+.timer{text-align:center;font-size:34px;font-weight:800;font-variant-numeric:tabular-nums}
+.timer.low{color:var(--red)}
+.chatlog{display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;background:#f4f0e8;border-radius:12px;padding:10px}
+.chatlog .msg{font-size:14px;line-height:1.35}
+.chatlog .msg b{color:var(--green)}
+.chatlog .sys{font-size:12px;color:var(--muted);font-style:italic;text-align:center}
+.chatrow{display:flex;gap:8px}
+.chatrow input{flex:1}
+.chatrow .btn{width:auto;padding:13px 18px}
+.vote-grid{display:flex;flex-direction:column;gap:8px}
+.note{font-size:12.5px;color:var(--muted);text-align:center;line-height:1.5}
+.big-emoji{font-size:44px;text-align:center}
+.result-win{color:var(--green);text-align:center;font-size:20px;font-weight:800}
+.result-lose{color:var(--red);text-align:center;font-size:20px;font-weight:800}
+.status{font-size:13px;text-align:center;color:var(--muted)}
+.status.err{color:var(--red)}
+.row{display:flex;gap:8px}
+.row > *{flex:1}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div class="app">
+<header><h1>Khel <span>Adda</span> Online</h1><div class="tag">Doston ke saath, alag-alag phones par. Free, bina signup.</div></header>
+<div id="screen"></div>
+<div class="note" id="foot">Rooms chhote honge toh sabse smooth chalega (3-8 players). Net chahiye.</div>
+</div>
+<script>
+"use strict";
+
+const ICONS={
+spy:'<svg viewBox="0 0 64 64" width="52" height="52" fill="none" stroke="#c25b4e" stroke-width="3.5" stroke-linecap="round"><path d="M14 26 L20 12 L32 20 L44 12 L50 26 Z" fill="#c25b4e" stroke="none"/><rect x="10" y="24" width="44" height="6" rx="3" fill="#c25b4e" stroke="none"/><circle cx="24" cy="40" r="7"/><circle cx="40" cy="40" r="7"/><path d="M17 40 L10 38 M47 40 L54 38 M31 40 L33 40"/></svg>',
+secret:'<svg viewBox="0 0 64 64" width="52" height="52" fill="none" stroke="#5f9c8a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14 h40 v30 h-24 l-8 8 v-8 h-8 Z"/><text x="32" y="38" text-anchor="middle" font-size="26" font-weight="800" fill="#5f9c8a" stroke="none">?</text></svg>',
+target:'<svg viewBox="0 0 64 64" width="52" height="52" fill="none" stroke="#2b2620" stroke-width="3.5"><circle cx="32" cy="32" r="20"/><circle cx="32" cy="32" r="11"/><circle cx="32" cy="32" r="3.5" fill="#c25b4e" stroke="none"/></svg>',
+party:'<svg viewBox="0 0 64 64" width="52" height="52" fill="none" stroke="#5f9c8a" stroke-width="3.5" stroke-linecap="round"><path d="M18 44 L34 12 L46 18 L40 46 Z" fill="#e8f4f0"/><path d="M20 50 L42 50"/><path d="M14 10 l3 3 M50 8 l-2 4 M56 22 l-4 1 M10 26 l4 2"/><circle cx="52" cy="14" r="2" fill="#c9a227" stroke="none"/><circle cx="12" cy="18" r="2" fill="#c25b4e" stroke="none"/><circle cx="54" cy="34" r="2" fill="#5f9c8a" stroke="none"/></svg>',
+devil:'<svg viewBox="0 0 64 64" width="52" height="52" fill="none" stroke="#c25b4e" stroke-width="3.5" stroke-linecap="round"><path d="M16 22 L10 8 L24 16 M48 22 L54 8 L40 16"/><circle cx="32" cy="38" r="17"/><circle cx="26" cy="35" r="2.2" fill="#c25b4e" stroke="none"/><circle cx="38" cy="35" r="2.2" fill="#c25b4e" stroke="none"/><path d="M24 45 q8 6 16 0"/></svg>',
+wait:'<svg viewBox="0 0 64 64" width="44" height="44" fill="none" stroke="#7a7268" stroke-width="3.5" stroke-linecap="round"><path d="M18 8 h28 M18 56 h28 M20 8 c0 14 8 18 12 24 c-4 6 -12 10 -12 24 M44 8 c0 14 -8 18 -12 24 c4 6 12 10 12 24"/></svg>'
+};
+
+const $=s=>document.querySelector(s);
+const screen=$('#screen');
+const S={peer:null,conn:null,conns:{},isHost:false,code:'',me:{id:'',name:''},players:[],phase:'home',endAt:0,word:'',pack:'mixed',minutes:3,votes:{},accused:'',timerInt:null};
+
+const PACKS={
+mixed:['Chai','Cricket','Auto Rickshaw','Bollywood','Monsoon','Samosa','Diwali','Local Train','Gully Cricket','Pani Puri','Rickshawala','Shaadi','Holi','Cutting Chai','Jugaad','Dhaba','Ludo','Antakshari'],
+food:['Biryani','Masala Dosa','Chole Bhature','Pav Bhaji','Momos','Jalebi','Butter Chicken','Pani Puri','Vada Pav','Rasgulla','Paratha','Dhokla','Idli','Samosa','Lassi','Pakora'],
+places:['Taj Mahal','Goa Beach','Mumbai Local','Dilli Haat','Vaishno Devi','Marine Drive','Chandni Chowk','Hawa Mahal','Darjeeling','Varanasi Ghat','India Gate','Manali','Kerala Boat','Red Fort','Ooty','Amritsar'],
+things:['Pressure Cooker','Balti','Jhadu','Tiffin Box','Torch','Khatiya','Cooler','Bucket','Mobile Charger','Chappal','Umbrella','Sewing Machine','Trunk','Lottery Ticket','Gas Cylinder','Bansuri']
+};
+function allWords(p){return p==='mixed'?PACKS.mixed:PACKS[p]||PACKS.mixed;}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function mkCode(){const c='ABCDEFGHJKMNPQRSTUVWXYZ23456789';let s='';for(let i=0;i<4;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
+function peerId(code){return 'khel-adda-room-'+code;}
+function setStatus(msg,err){const el=$('#status');if(el){el.textContent=msg||'';el.className='status'+(err?' err':'');}}
+function render(fn){if(S.timerInt){clearInterval(S.timerInt);S.timerInt=null;}screen.innerHTML='';fn(screen);window.scrollTo(0,0);}
+
+/* ---------- HOME ---------- */
+function uiHome(){render(el=>{el.innerHTML=`
+<div class="card">
+  <h2>Apna naam likho</h2>
+  <input id="name" maxlength="16" placeholder="Naam" value="${esc(S.me.name)}">
+</div>
+<div class="card">
+  <h2>Naya room</h2>
+  <button class="btn" id="create">Room banao</button>
+</div>
+<div class="card">
+  <h2>Dost ke room mein aao</h2>
+  <input id="joincode" maxlength="4" placeholder="4-letter code" style="text-transform:uppercase">
+  <button class="btn ghost" id="join">Room join karo</button>
+  <div class="status" id="status"></div>
+</div>`;
+$('#name').addEventListener('input',e=>{S.me.name=e.target.value;});
+$('#create').addEventListener('click',()=>{const n=S.me.name.trim();if(!n)return setStatus('Pehle naam likho',1);hostRoom(n);});
+$('#join').addEventListener('click',()=>{const n=S.me.name.trim();const c=$('#joincode').value.trim().toUpperCase();if(!n)return setStatus('Pehle naam likho',1);if(c.length!==4)return setStatus('4-letter code daalo',1);joinRoom(n,c);});
+$('#joincode').addEventListener('keydown',e=>{if(e.key==='Enter')$('#join').click();});
+});}
+
+/* ---------- HOST ---------- */
+function hostRoom(name){
+  S.code=mkCode();S.isHost=true;S.me.id='host';
+  S.players=[{id:'host',name}];
+  S.peer=new Peer(peerId(S.code));
+  S.peer.on('open',()=>uiLobby());
+  S.peer.on('error',e=>{console.warn(e);setStatus('Room nahi ban paya. Dobara try karo.',1);});
+  S.peer.on('connection',conn=>{
+    conn.on('data',msg=>{
+      if(msg.t==='join'){
+        conn._pname=String(msg.name||'Player').slice(0,16);
+        S.conns[conn.peer]=conn;
+        S.players.push({id:conn.peer,name:conn._pname});
+        send(conn,{t:'welcome',id:conn.peer,code:S.code});
+        bcastLobby();uiLobby();
+      } else if(msg.t==='chat'){bcast({t:'chat',name:pname(conn.peer),text:String(msg.text).slice(0,140)});}
+      else if(msg.t==='vote'){onVote(conn.peer,msg.vote);}
+      else if(msg.t==='spyguess'){onSpyGuess(String(msg.word||''));}
+    });
+    conn.on('close',()=>{
+      const i=S.players.findIndex(p=>p.id===conn.peer);
+      const nm=i>=0?S.players[i].name:'';
+      delete S.conns[conn.peer];
+      if(i>0){S.players.splice(i,1);bcast({t:'sys',text:nm+' chala gaya'});bcastLobby();if(S.phase==='lobby')uiLobby();}
+    });
+  });
+}
+function pname(id){const p=S.players.find(p=>p.id===id);return p?p.name:'Player';}
+function send(conn,msg){try{conn.send(msg);}catch(e){}}
+function bcast(msg){Object.values(S.conns).forEach(c=>send(c,msg));if(msg.t==='chat')addChat(msg.name,msg.text);if(msg.t==='sys')addSys(msg.text);}
+function bcastLobby(){bcast({t:'lobby',players:S.players.map(p=>({id:p.id,name:p.name}))});}
+
+/* ---------- GUEST ---------- */
+function joinRoom(name,code){
+  S.isHost=false;S.code=code;
+  S.peer=new Peer();
+  S.peer.on('error',e=>{console.warn(e);setStatus('Connect nahi hua. Code sahi hai? Room abhi khula hai?',1);});
+  S.peer.on('open',()=>{
+    const conn=S.peer.connect(peerId(code),{reliable:true});
+    S.conn=conn;
+    conn.on('open',()=>{conn.send({t:'join',name});uiJoinWait();});
+    conn.on('data',onGuestMsg);
+    conn.on('close',()=>{uiHome();alert('Host ne room band kar diya ya net cut gaya.');});
+    setTimeout(()=>{if(S.phase==='home')setStatus('Room mila nahi. Code check karke dobara try karo.',1);},8000);
+  });
+}
+function onGuestMsg(m){
+  if(m.t==='welcome'){S.me.id=m.id;}
+  else if(m.t==='lobby'){S.players=m.players;if(S.phase==='joinwait'||S.phase==='lobby')uiLobby();}
+  else if(m.t==='start'){S.pack=m.pack;S.minutes=m.minutes;}
+  else if(m.t==='role'){S.word=m.word;S.phase='role';uiRole();}
+  else if(m.t==='discuss'){S.endAt=m.endAt;S.phase='discuss';uiDiscuss();}
+  else if(m.t==='votephase'){S.endAt=m.endAt;S.phase='vote';uiVote();}
+  else if(m.t==='chat'){addChat(m.name,m.text);}
+  else if(m.t==='sys'){addSys(m.text);}
+  else if(m.t==='result'){uiResult(m);}
+  else if(m.t==='spyguesstime'){uiSpyGuessWait(m.spyName);}
+}
+
+/* ---------- JOIN WAIT ---------- */
+function uiJoinWait(){S.phase='joinwait';render(el=>{el.innerHTML=`
+<div class="card" style="text-align:center"><div class="big-emoji">${ICONS.wait}</div><h2>Room mein ja rahe ho...</h2><div class="note">Host ka room milte hi lobby khulegi.</div></div>`;});}
+
+/* ---------- LOBBY ---------- */
+function uiLobby(){
+  S.phase='lobby';
+  render(el=>{el.innerHTML=`
+<div class="card" style="text-align:center">
+  <h2>Room code</h2>
+  <div class="code">${S.code}</div>
+  <div class="note">Doston ko ye code do. Sab apne phone par khelenge.</div>
+</div>
+<div class="card">
+  <h2>Players (${S.players.length})</h2>
+  <div class="players">${S.players.map(p=>`<div class="pill"><span class="dot"></span>${esc(p.name)}${p.id==='host'?'<span class="host-tag">HOST</span>':''}${p.id===S.me.id?'<span class="me">(tum)</span>':''}</div>`).join('')}</div>
+</div>
+${S.isHost?`
+<div class="card">
+  <h2>Game settings</h2>
+  <label>Word pack</label>
+  <select id="pack">
+    <option value="mixed">Mixed (sab kuch)</option>
+    <option value="food">Khana</option>
+    <option value="places">Jagah</option>
+    <option value="things">Ghar ki cheezein</option>
+  </select>
+  <label>Discussion time</label>
+  <select id="minutes"><option value="2">2 min</option><option value="3" selected>3 min</option><option value="5">5 min</option></select>
+  <button class="btn" id="start" ${S.players.length<3?'disabled':''}>Kaun Spy Hai shuru karo${S.players.length<3?' (kam se kam 3 players)':''}</button>
+  <div class="note">Abhi online version mein Kaun Spy Hai hai. Aur games aur voice chat kaam par hain.</div>
+</div>`:`
+<div class="card"><div class="note">Host game shuru karega. Pack aur time host chunta hai.</div></div>`}`;
+  if(S.isHost){const b=$('#start');if(b)b.addEventListener('click',startGame);}
+});}
+function startGame(){
+  S.pack=$('#pack').value;S.minutes=parseInt($('#minutes').value,10);
+  const words=allWords(S.pack);
+  const word=words[Math.floor(Math.random()*words.length)];
+  const spyIdx=Math.floor(Math.random()*S.players.length);
+  S.players.forEach((p,i)=>{
+    const roleMsg={t:'role',word:i===spyIdx?'':word,spy:i===spyIdx};
+    if(p.id==='host'){S.word=i===spyIdx?'':word;S.me.spy=i===spyIdx;}
+    else send(S.conns[p.id],roleMsg);
+  });
+  bcast({t:'start',pack:S.pack,minutes:S.minutes});
+  S.secretWord=word;S.spyId=S.players[spyIdx].id;
+  S.phase='role';uiRole();
+  setTimeout(()=>{S.endAt=Date.now()+S.minutes*60000;bcast({t:'discuss',endAt:S.endAt});S.phase='discuss';uiDiscuss();},9000);
+}
+
+/* ---------- ROLE REVEAL ---------- */
+function uiRole(){render(el=>{
+  const spy=S.isHost?S.me.spy:(S.word==='');
+  el.innerHTML=`
+<div class="card" style="text-align:center;gap:16px">
+  <div class="big-emoji">${spy?ICONS.spy:ICONS.secret}</div>
+  ${spy?`<div class="word-card spy">TUM SPY HO!</div><div class="note">Tumhe word nahi pata. Baaton se guess karo, pakde mat jao!</div>`
+      :`<div class="note">Tumhara word hai:</div><div class="word-card citizen">${esc(S.word)}</div><div class="note">Spy ko mat batao. Sab isi word ke aas-paas baat karenge.</div>`}
+  <div class="note">Kuch hi second mein discussion shuru hoga...</div>
+</div>`;
+});}
+
+/* ---------- DISCUSSION ---------- */
+function uiDiscuss(){render(el=>{el.innerHTML=`
+<div class="card">
+  <h2 style="text-align:center">Discussion chal rahi hai</h2>
+  <div class="timer" id="t">--:--</div>
+  <div class="note">Aapas mein baat karo: word ke baare mein hints do, spy ko pakdo. Neeche likh kar bhi baat kar sakte ho.</div>
+</div>
+<div class="card">
+  <div class="chatlog" id="chatlog"></div>
+  <div class="chatrow"><input id="chatin" maxlength="140" placeholder="Message likho..."><button class="btn" id="sendchat">Bhejo</button></div>
+</div>
+${S.isHost?'<button class="btn danger" id="tovote">Voting shuru karo</button>':'<div class="note">Time khatam hone par voting shuru hogi.</div>'}`;
+wireChat();
+$('#tovote')?.addEventListener('click',beginVote);
+startTimer(()=>{if(S.isHost)beginVote();});
+});}
+function wireChat(){
+  const inp=$('#chatin');
+  const sendChat=()=>{const v=inp.value.trim();if(!v)return;inp.value='';
+    if(S.isHost)bcast({t:'chat',name:S.players[0].name,text:v.slice(0,140)});
+    else S.conn&&S.conn.send({t:'chat',text:v});};
+  $('#sendchat').addEventListener('click',sendChat);
+  inp.addEventListener('keydown',e=>{if(e.key==='Enter')sendChat();});
+}
+function addChat(name,text){const l=$('#chatlog');if(!l)return;const d=document.createElement('div');d.className='msg';d.innerHTML=`<b>${esc(name)}:</b> ${esc(text)}`;l.appendChild(d);l.scrollTop=l.scrollHeight;}
+function addSys(text){const l=$('#chatlog');if(!l)return;const d=document.createElement('div');d.className='sys';d.textContent=text;l.appendChild(d);l.scrollTop=l.scrollHeight;}
+function startTimer(onEnd){
+  const tick=()=>{const left=Math.max(0,S.endAt-Date.now());const m=Math.floor(left/60000),s=Math.floor(left%60000/1000);
+    const t=$('#t');if(t){t.textContent=m+':'+String(s).padStart(2,'0');t.className='timer'+(left<30000?' low':'');}
+    if(left<=0){clearInterval(S.timerInt);S.timerInt=null;onEnd&&onEnd();}};
+  tick();S.timerInt=setInterval(tick,500);
+}
+
+/* ---------- VOTING ---------- */
+function beginVote(){
+  if(!S.isHost)return;
+  S.votes={};
+  S.endAt=Date.now()+45000;
+  bcast({t:'votephase',endAt:S.endAt});
+  S.phase='vote';uiVote();
+}
+function onVote(from,vote){
+  if(S.phase!=='vote')return;
+  S.votes[from]=String(vote);
+  bcast({t:'sys',text:pname(from)+' ne vote kiya'});
+  if(Object.keys(S.votes).length>=S.players.length)finishVote();
+}
+function finishVote(){
+  const tally={};
+  Object.values(S.votes).forEach(v=>{tally[v]=(tally[v]||0)+1;});
+  let top='',topN=0;
+  for(const[id,n]of Object.entries(tally)){if(n>topN){topN=n;top=id;}}
+  S.accused=top;
+  if(top===S.spyId){
+    bcast({t:'spyguesstime',spyName:pname(S.spyId)});
+    uiSpyGuessWait(pname(S.spyId));
+    setTimeout(()=>{if(S.phase==='vote')onSpyGuess('__timeout__');},30000);
+  } else {
+    endRound(false,'');
+  }
+}
+function onSpyGuess(guess){
+  if(S.phase!=='vote')return;
+  const win=guess.trim().toLowerCase()===S.secretWord.toLowerCase();
+  endRound(win,guess==='__timeout__'?'':guess);
+}
+function endRound(spyEscaped,guess){
+  const r={t:'result',spyName:pname(S.spyId),word:S.secretWord,accused:pname(S.accused),
+    spyCaught:S.accused===S.spyId,spyEscaped,guess};
+  bcast(r);uiResult(r);
+}
+
+/* ---------- VOTE UI ---------- */
+function uiVote(){render(el=>{el.innerHTML=`
+<div class="card">
+  <h2 style="text-align:center">Kaun hai Spy?</h2>
+  <div class="timer" id="t">--:--</div>
+  <div class="note">Sabse shakki insaan par vote karo.</div>
+</div>
+<div class="card"><div class="vote-grid">
+${S.players.filter(p=>p.id!==S.me.id).map(p=>`<button class="btn ghost" data-v="${p.id}">${esc(p.name)}</button>`).join('')}
+</div><div class="note" id="voted"></div></div>
+<div class="card"><div class="chatlog" id="chatlog"></div></div>`;
+startTimer(()=>{if(S.isHost)finishVote();});
+el.querySelectorAll('[data-v]').forEach(b=>b.addEventListener('click',()=>{
+  const v=b.getAttribute('data-v');
+  if(S.isHost){onVote('host',v);}else{S.conn&&S.conn.send({t:'vote',vote:v});}
+  el.querySelectorAll('[data-v]').forEach(x=>x.disabled=true);
+  $('#voted').textContent='Vote ho gaya. Baaki players ka intezaar...';
+}));
+});}
+
+/* ---------- SPY GUESS / RESULT ---------- */
+function uiSpyGuessWait(spyName){render(el=>{el.innerHTML=`
+<div class="card" style="text-align:center;gap:14px">
+  <div class="big-emoji">${ICONS.target}</div>
+  <h2>${esc(spyName)} spy nikla!</h2>
+  ${S.isHost&&S.spyId==='host'||(!S.isHost&&S.spyId===S.me.id)?`
+    <div class="note">Aakhri mauka: word guess karo toh tum jeet jaoge!</div>
+    <input id="sg" maxlength="30" placeholder="Word guess karo">
+    <button class="btn" id="sgbtn">Guess karo</button>`
+  :`<div class="note">Spy ka aakhri mauka: agar usne word guess kar liya toh woh jeet jayega. 30 second...</div>`}
+</div>`;
+  const go=()=>{const w=($('#sg')||{}).value||'';if(S.isHost)onSpyGuess(w);else S.conn&&S.conn.send({t:'spyguess',word:w});};
+  $('#sgbtn')?.addEventListener('click',go);
+});}
+function uiResult(r){S.phase='result';render(el=>{
+  const citizensWin=r.spyCaught&&!r.spyEscaped;
+  el.innerHTML=`
+<div class="card" style="text-align:center;gap:12px">
+  <div class="big-emoji">${citizensWin?ICONS.party:ICONS.devil}</div>
+  <div class="${citizensWin?'result-win':'result-lose'}">${citizensWin?'Citizens jeet gaye!':'Spy jeet gaya!'}</div>
+  <div class="note">Spy tha: <b>${esc(r.spyName)}</b></div>
+  <div class="note">Word tha: <b>${esc(r.word)}</b></div>
+  ${r.spyCaught?`<div class="note">Vote pakda gaya: ${esc(r.accused)}${r.guess?`<br>Spy ka guess: ${esc(r.guess)}`:''}</div>`
+    :`<div class="note">${esc(r.accused)} spy nahi tha. Spy bach nikla!</div>`}
+</div>
+${S.isHost?'<button class="btn" id="again">Naya round (naya word, naya spy)</button>':''}
+<button class="btn ghost" id="leave">Room chhodo</button>`;
+$('#again')?.addEventListener('click',()=>{startGame();});
+$('#leave').addEventListener('click',()=>{try{S.peer&&S.peer.destroy();}catch(e){}location.reload();});
+});}
+
+uiHome();
+</script>
+</body>
+</html>
