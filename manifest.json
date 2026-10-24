@@ -1,0 +1,17 @@
+{
+  "name": "Khel Adda - Party Games",
+  "short_name": "Khel Adda",
+  "description": "Doston ke saath online party games: Kaun Spy Hai, Banao aur Guess Karo, voice chat ke saath.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f3ee",
+  "theme_color": "#5f9c8a",
+  "lang": "hi",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
